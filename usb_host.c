@@ -75,6 +75,8 @@ USB_NOCACHE_RAM_SECTION FIL fnew;
 UINT fnum;
 FRESULT res_sd = 0;
 
+// in diskio.h, DEV_USB is 4
+
 int usb_msc_fatfs_test()
 {
     const char *tmp_data = "cherryusb fatfs demo...\r\n";
@@ -84,14 +86,14 @@ int usb_msc_fatfs_test()
         memcpy(&read_write_buffer[i * 25], tmp_data, strlen(tmp_data));
     }
 
-    res_sd = f_mount(&fs, "2:", 1);
+    res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
-        USB_LOG_RAW("mount fail,res:%d\r\n", res_sd);
+        USB_LOG_RAW("mount fail, res:%d\r\n", res_sd);
         return -1;
     }
 
     USB_LOG_RAW("test fatfs write\r\n");
-    res_sd = f_open(&fnew, "2:test.txt", FA_CREATE_ALWAYS | FA_WRITE);
+    res_sd = f_open(&fnew, "usb:test.txt", FA_CREATE_ALWAYS | FA_WRITE);
     if (res_sd == FR_OK) {
         res_sd = f_write(&fnew, read_write_buffer, sizeof(read_write_buffer), &fnum);
         if (res_sd == FR_OK) {
@@ -107,7 +109,7 @@ int usb_msc_fatfs_test()
     }
     USB_LOG_RAW("test fatfs read\r\n");
 
-    res_sd = f_open(&fnew, "2:test.txt", FA_OPEN_EXISTING | FA_READ);
+    res_sd = f_open(&fnew, "usb:test.txt", FA_OPEN_EXISTING | FA_READ);
     if (res_sd == FR_OK) {
         res_sd = f_read(&fnew, read_write_buffer, sizeof(read_write_buffer), &fnum);
         if (res_sd == FR_OK) {
@@ -121,10 +123,10 @@ int usb_msc_fatfs_test()
         USB_LOG_RAW("open fail\r\n");
         goto unmount;
     }
-    f_mount(NULL, "2:", 1);
+    f_mount(NULL, "", 1);
     return 0;
 unmount:
-    f_mount(NULL, "2:", 1);
+    f_mount(NULL, "", 1);
     return -1;
 }
 #endif
@@ -137,9 +139,7 @@ static void usbh_msc_thread(void *argument)
     struct usbh_msc *msc_class;
 
     while (1) {
-        // clang-format off
 find_class:
-        // clang-format on
         msc_class = (struct usbh_msc *)usbh_find_class_instance("/dev/sda");
         if (msc_class == NULL) {
             USB_LOG_RAW("do not find /dev/sda\r\n");
@@ -164,9 +164,12 @@ find_class:
         USB_LOG_RAW("\r\n");
 #endif
 
-// #if TEST_USBH_MSC_FATFS
+#if TEST_USBH_MSC_FATFS
+        extern void fatfs_usbh_driver_register(void);
+        fatfs_usbh_driver_register();       // register the USB disk driver to FatFS
+
         usb_msc_fatfs_test();
-// #endif
+#endif
         while (1) {
             msc_class = (struct usbh_msc *)usbh_find_class_instance("/dev/sda");
             if (msc_class == NULL) {

@@ -158,7 +158,7 @@ All configuration items must be included in the file */
 #define FF_VOLUMES 5
 /* Number of volumes (logical drives) to be used. (1-10) */
 
-#define FF_STR_VOLUME_ID 2
+#define FF_STR_VOLUME_ID 1
 #define FF_VOLUME_STRS   "ram", "flash", "sd", "sd2", "usb"
 /* FF_STR_VOLUME_ID switches support for volume ID in arbitrary strings.
 /  When FF_STR_VOLUME_ID is set to 1 or 2, arbitrary strings can be used as drive
@@ -188,7 +188,7 @@ All configuration items must be included in the file */
 /  for variable sector size mode and disk_ioctl() function needs to implement
 /  GET_SECTOR_SIZE command. */
 
-#define FF_LBA64 1
+#define FF_LBA64 0
 /* This option switches support for 64-bit LBA. (0:Disable or 1:Enable)
 /  To enable the 64-bit LBA, also exFAT needs to be enabled. (FF_FS_EXFAT == 1) */
 
