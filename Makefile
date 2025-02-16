@@ -1,5 +1,5 @@
 SDK_DEMO_PATH ?= .
-BL_SDK_BASE ?= $(SDK_DEMO_PATH)/../bouffalo_sdk_harbaum
+BL_SDK_BASE ?= $(SDK_DEMO_PATH)/../../bouffalo_sdk_harbaum
 
 export BL_SDK_BASE
 
