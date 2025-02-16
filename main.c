@@ -24,15 +24,19 @@ struct usbh_msc *msc;
 // FRESULT res_sd = 0;
 
 // Add function prototype at the top
+bool uart0_active = false;
+
 static void init_gpio_and_uart(void)
 {
     gpio_dev = bflb_device_get_by_name("gpio");
-    /* Core control UART */
+    /* Core control UART 1 */
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
-    /* Debug UART */
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
+    /* Debug UART 0 */
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
+    if (uart0_active) {
+        bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
+    }
 
     /* Set up Core control UART parameters */
     struct bflb_uart_config_s uart1_cfg = {
@@ -69,14 +73,13 @@ static void init_gpio_and_uart(void)
     bflb_uart_set_console(uart0_dev);
 }
 
-bool uart0_active = false;
 static uint32_t uart0_last_time;
-// If uart0 is not used for 1 second, turn it off to restore JTAG operations
+// If uart0 is not used for 0.5 second, turn it off to allow JTAG operations
 static void uart0_timeout(void) {
     uint32_t now = bflb_mtimer_get_time_ms();
-    if (now - uart0_last_time > 1000) {
+    if (now - uart0_last_time > 500) {
         bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
-        bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
+        // bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
         uart0_active = false;
     }
 }
@@ -84,14 +87,25 @@ static void uart0_timeout(void) {
 static void uart0_on(void) {
     if (!uart0_active) {
         bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
-        bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
+        // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
         uart0_active = true;
     }
     uart0_last_time = bflb_mtimer_get_time_ms();
 }
 
-void overlay_cursor(int row, int col) {
+void debug_printf(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
     uart0_on();
+    for (int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) 
+        bflb_uart_putchar(uart0_dev, buf[i]);
+}
+
+void overlay_cursor(int col, int row) {
     // uart1 command: 4 x[7:0] y[7:0]
     bflb_uart_putchar(uart1_dev, 0x04);       // command 4, move cursor
     bflb_uart_putchar(uart1_dev, col);
@@ -105,50 +119,55 @@ void overlay_printf(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
     
-    uart0_on();
     bflb_uart_putchar(uart1_dev, 0x05);       // command 5, display string
     for(int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) {
         bflb_uart_putchar(uart1_dev, buf[i]);
     }
+    bflb_uart_putchar(uart1_dev, '\0');
 }
 
 void overlay_clear() {
     overlay_cursor(0, 0);
     for (int i = 0; i < 28; i++) {
-        overlay_printf("                                \r\n");
+        //              01234567890123456789012345678901
+        overlay_printf("                                ");
     }
 }
 
 static void main_task(void *pvParameters)
 {
-    bool redraw = true;
+    uint32_t last_redraw_time = 0;
 
     while (1) {
+        bool redraw = false;
+        uint32_t now = bflb_mtimer_get_time_ms();
+        // redraw every 5 seconds 
+        if (now - last_redraw_time > 5000) {         
+            redraw = true;
+            last_redraw_time = now;
+        }
+
         if (redraw) {
-            overlay_clear();
+            // overlay_clear();
             overlay_cursor(2, 10);
             //              01234567890123456789012345678901
             overlay_printf("=== Welcome to Tangcores ===\r\n");
 
             overlay_cursor(2, 12);
-            overlay_printf("1) Load ROM from SD card\n");
+            overlay_printf("1) Load ROM from USB drive\n");
             overlay_cursor(2, 13);
             overlay_printf("2) Select core\n");
             overlay_cursor(2, 14);
             overlay_printf("3) Options\n");
-            // cursor(2, 15);
-            // print("4) Verify core\n");
             overlay_cursor(2, 16);
             overlay_printf("Version: ");
             overlay_printf(__DATE__);
-            redraw = false;
         }
 
         uart0_timeout();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
-
 
 #define MAIN_TASK_STACK_SIZE  1024
 #define MAIN_TASK_PRIORITY    2
