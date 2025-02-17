@@ -43,10 +43,10 @@ static void init_gpio_and_uart(void)
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
     /* Debug UART 0 */
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
-    if (uart0_active) {
-        bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
-    }
+    // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
+    // if (uart0_active) {
+    //     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
+    // }
 
     /* Set up Core control UART parameters */
     struct bflb_uart_config_s uart1_cfg = {
@@ -110,7 +110,7 @@ void debug_printf(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    uart0_on();
+    // uart0_on();
     for (int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) 
         bflb_uart_putchar(uart0_dev, buf[i]);
 }
@@ -449,19 +449,17 @@ static void main_task(void *pvParameters)
                 last_redraw_time = now;
             }
 
-            uint16_t joy1, joy2;
-            get_joypad_states(&joy1, &joy2);
-            overlay_cursor(0, 27);
-            overlay_printf("joy1=%04x, joy2=%04x", joy1, joy2);
+            // uint16_t joy1, joy2;
+            // get_joypad_states(&joy1, &joy2);
+            // overlay_cursor(0, 27);
+            // overlay_printf("joy1=%04x, joy2=%04x", joy1, joy2);
 
             uart0_timeout();        // necessary to keep JTAG alive
 
-/*
             int r = joy_choice(12, 5, &choice);
             if (r == 1) break;
 
             vTaskDelay(pdMS_TO_TICKS(300));
-            */
         }
 
 /*
@@ -526,7 +524,7 @@ static void uart1_rx_task(void *pvParameters)
                 pos = 0; // Reset if we get out of sync
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
