@@ -7,17 +7,17 @@
 #include "board.h"
 #include "bl616_glb.h"
 #include "task.h"
+#include "ff.h"
 
-#include "main.h"
-
-
-extern void usbh_class_test(void);
-extern void bflb_uart_set_console(struct bflb_device_s *dev);
+#include "programmer.h"
+#include "utils.h"
 
 // UART
 struct bflb_device_s *gpio_dev;
 struct bflb_device_s *uart0_dev;
 struct bflb_device_s *uart1_dev;
+
+extern void bflb_uart_set_console(struct bflb_device_s *dev);
 
 // USB and fatfs
 struct usbh_msc *msc;
@@ -25,6 +25,7 @@ struct usbh_msc *msc;
 // USB_NOCACHE_RAM_SECTION FIL fnew;
 // UINT fnum;
 // FRESULT res_sd = 0;
+char load_fname[1024];
 
 // Add function prototype at the top
 bool uart0_active = false;
@@ -39,6 +40,13 @@ void get_joypad_states(uint16_t *joy1, uint16_t *joy2);
 static void init_gpio_and_uart(void)
 {
     gpio_dev = bflb_device_get_by_name("gpio");
+
+    // JTAG pins
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT     | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
+
     /* Core control UART 1 */
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
@@ -224,7 +232,8 @@ const char *ROM_DIR[] = {
     "usb:nes",
     "usb:snes",
     "usb:gba",
-    "usb:genesis"
+    "usb:genesis",
+    "usb:cores"
 };
 
 #include "ff.h"
@@ -239,6 +248,96 @@ char file_names[PAGESIZE][256];
 int file_dir[PAGESIZE];
 int file_sizes[PAGESIZE];
 int file_len;		// number of files on this page
+
+
+bool load_core(char *fname) {
+    FRESULT res_sd = f_mount(&fs, "usb:", 1);
+    if (res_sd != FR_OK) {
+        overlay_printf("mount fail, res:%d\r\n", res_sd);
+        return false;
+    }    
+
+    FIL fcore;
+    res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
+    if (res_sd != FR_OK) {
+        overlay_printf("open fail, res:%d\r\n", res_sd);
+        return false;
+    }
+    FILINFO fno;
+    f_stat(fname, &fno);
+    int len = fno.fsize;
+
+    uint8_t *buf = NULL;
+    bool res = false;
+    buf = malloc(8*1024);   // 8KB buffer
+    if (!buf) {
+        overlay_printf("Cannot malloc buffer\r\n");
+        goto load_core_close;
+    }
+
+    chain_len = detectChain(JTAG_MAX_CHAIN);
+    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
+        overlay_printf("No GW5AT-60 or GW5AST-138 detected\n");
+        goto program_free;
+    }
+
+    overlay_status("Reset FPGA");
+    fpgaReset();
+
+    overlay_status("Erasing SRAM...");
+    if (!eraseSRAM()) {
+        overlay_printf("Failed to erase SRAM\n");
+        goto program_free;
+    }
+
+    overlay_status("Erasing again...");
+    if (!eraseSRAM()) {
+        overlay_printf("Failed to erase SRAM 2nd time\n");
+        goto program_free;
+    }    
+
+    overlay_status("Writing...");
+    if (!writeSRAM_start()) {
+        overlay_printf("Failed to start write SRAM\n");
+        goto program_free;
+    }
+
+    int bytes, sent;
+    do {
+        f_read(&fcore, buf, 8*1024, &bytes);
+        if (bytes == 0) break;
+
+        // reverse msb/lsb as Gowin bitstream needs to MSB first
+        static unsigned char lookup[16] = {
+            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
+        for (int j = 0; j < bytes; j++)
+            buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
+
+        bool last = sent + bytes >= len;
+        if (!writeSRAM_send(buf, bytes*8, last)) {
+            printf("Failed to send data to SRAM\n");
+            goto program_free;
+        }
+        sent += bytes;
+
+    } while (bytes == 8*1024);
+ 
+    if (!writeSRAM_end()) {
+        printf("Failed to program SRAM\n");
+        goto program_free;
+    }
+
+    // printf("Status after program sram: %x\n", readStatusReg());
+    res = true;
+
+program_free:
+    free(buf);    
+
+load_core_close:
+    f_close(&fcore);
+    return res;
+}
 
 // starting from `start`, load `len` file names into file_names, 
 // file_dir. 
@@ -353,10 +452,15 @@ static void menu_loadrom(char *dir, int *choice) {
                         int res = 1;
                         
                         // todo: actually load core and rom
-
-                        if (res != 0) {
-                            overlay_message("Cannot load rom",1);
-                            break;
+                        // pwd determines the type of the ROM
+                        if (prefix("usb:cores", pwd)) {
+                            strncpy(load_fname, pwd, 1024);
+                            strncat(load_fname, "/", 1024);
+                            strncat(load_fname, file_names[active], 1024);
+                            overlay_status("Core: %s", file_names[active]);
+                            load_core(load_fname);
+                        } else {
+                            overlay_message("ROM loading not implemented",1);
                         }
                     }
                 }
@@ -408,7 +512,7 @@ int joy_choice(int start_line, int len, int *active) {
     overlay_printf(">");
 
     overlay_cursor(0, 27);
-    overlay_printf("joy1=%04x, joy2=%04x", joy1, joy2);
+    // overlay_printf(" joy1=%04x, joy2=%04x", joy1, joy2);
     if (last != *active) {
         overlay_cursor(0, start_line + last);
         overlay_printf(" ");
@@ -422,23 +526,28 @@ static void main_task(void *pvParameters)
     uint32_t last_redraw_time = 0;
 
     while (1) {
+        bool redraw = true;
         int choice = 0;
         for (;;) {
             uint32_t now = bflb_mtimer_get_time_ms();
-            if (now - last_redraw_time > 5000) {
+            if (now - last_redraw_time > 5000) 
+                redraw = true;
+            if (redraw) {
                 overlay_clear();
-                overlay_cursor(2, 10);
+                overlay_cursor(2, 9);
                 //              01234567890123456789012345678901
-                overlay_printf("=== Welcome to Tangcores ===\r\n");
+                overlay_printf("=== Welcome to TangCore ===\r\n");
 
-                overlay_cursor(2, 12);
+                overlay_cursor(2, 11);
                 overlay_printf("NES\n");
-                overlay_cursor(2, 13);
+                overlay_cursor(2, 12);
                 overlay_printf("SNES");
-                overlay_cursor(2, 14);
+                overlay_cursor(2, 13);
                 overlay_printf("GBA");
-                overlay_cursor(2, 15);
+                overlay_cursor(2, 14);
                 overlay_printf("MegaDrive / Genesis");
+                overlay_cursor(2, 15);
+                overlay_printf("Cores");
 
                 overlay_cursor(2, 16);
                 overlay_printf("Options");
@@ -447,6 +556,7 @@ static void main_task(void *pvParameters)
                 overlay_printf("Version: ");
                 overlay_printf(__DATE__);
                 last_redraw_time = now;
+                redraw = false;
             }
 
             // uint16_t joy1, joy2;
@@ -456,21 +566,19 @@ static void main_task(void *pvParameters)
 
             uart0_timeout();        // necessary to keep JTAG alive
 
-            int r = joy_choice(12, 5, &choice);
+            int r = joy_choice(11, 6, &choice);
             if (r == 1) break;
 
-            vTaskDelay(pdMS_TO_TICKS(300));
+            // vTaskDelay(pdMS_TO_TICKS(200));
         }
 
-/*
-        if (choice <= 3) {  // 0: NES, 1: SNES, 2: GBA, 3: MegaDrive / Genesis
-            // Load ROM from USB drive
+        if (choice <= 4) {  // 0: NES, 1: SNES, 2: GBA, 3: MegaDrive / Genesis, 4: Cores
+            // Load rom or core from USB drive
             menu_loadrom(ROM_DIR[choice], &choice);
         } else {
             // Options
             menu_options();
         } 
-*/
 
         vTaskDelay(pdMS_TO_TICKS(300));
     }
