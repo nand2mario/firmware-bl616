@@ -9,6 +9,8 @@ Author: nand2mario 2025.2
 #include <string.h>
 #include "programmer.h"
 #include "utils.h"
+#include <FreeRTOS.h>
+#include "task.h"
 
 int chain_len;
 uint32_t idcodes[JTAG_MAX_CHAIN];
@@ -422,6 +424,7 @@ static int shiftIR_end(unsigned char *tdi, unsigned char *tdo, int irlen, tapSta
 }
 static int shiftIR(const uint8_t *tdi, unsigned char *tdo, int irlen) {
     shiftIR_end(tdi, tdo, irlen, RUN_TEST_IDLE);
+	return 0;
 }
 
 static int shiftDR_end(const uint8_t *tdi, unsigned char *tdo, int drlen, tapState_t end_state)
@@ -463,6 +466,7 @@ static int shiftDR_end(const uint8_t *tdi, unsigned char *tdo, int drlen, tapSta
 
 static int shiftDR(const uint8_t *tdi, unsigned char *tdo, int drlen) {
     shiftDR_end(tdi, tdo, drlen, RUN_TEST_IDLE);
+	return 0;
 }
 
 // ------------------------------------------------------------
@@ -504,8 +508,8 @@ typedef enum prog_mode {
     READ_MODE = 3,
 } prog_mode;
 
-static prog_mode _mode = NONE_MODE;
-uint16_t _checksum;
+// static prog_mode _mode = NONE_MODE;
+// uint16_t _checksum;
 
 // trust we are little-endian
 #define htole32(x) (x)
@@ -552,6 +556,7 @@ bool pollFlag(uint32_t mask, uint32_t value)
 			return false;
 		}
 		timeout++;
+		vTaskDelay(1);
 	} while ((status & mask) != value);
 
 	return true;
@@ -617,11 +622,12 @@ int detectChain(int max_dev) {
 
 bool eraseSRAM() {
 	uint32_t id = idCode();
-	// uint32_t status = readStatusReg();
-	overlay_status("Erase: ID=%08x", id);
+	uint32_t status = readStatusReg();
+	overlay_cursor(2, 0);
+	overlay_printf("ID=%08x, status=%08x", id, status);
 
 	if (!enableCfg()) {
-		printf("FAIL to enable configuration\r\n");
+		overlay_status("FAIL to enable configuration\r\n");
 		return false;
 	}
 	send_command(ERASE_SRAM);	// 0x05
@@ -660,7 +666,7 @@ bool eraseSRAM() {
 
 bool writeSRAM_start() {
 	overlay_status("Load SRAM\r\n");
-	uint32_t status = readStatusReg();
+	// uint32_t status = readStatusReg();
 	// if (_verbose)
 	// 	displayReadReg("before write sram", readStatusReg());
 	// ProgressBar progress("Load SRAM", length, 50, _quiet);
@@ -674,7 +680,7 @@ bool writeSRAM_start() {
 	send_command(XFER_WRITE); // transfer configuration data 0x17
 
     // clear checksum
-	_checksum = 0;
+	// _checksum = 0;
     return true;
 }
 
@@ -696,7 +702,7 @@ bool writeSRAM_end() {
     // printf("Status after XFER_WRITE: 0x%08x\r\n", readStatusReg());
     // send checksum
     // send_command(0x0a);
-    uint32_t checksum = 0xF12D;     // _checksum;
+    // uint32_t checksum = 0xF12D;     // _checksum;
 	// shiftDR((uint8_t *)&checksum, NULL, 32);
 	// send_command(0x08);
 

@@ -18,6 +18,7 @@ struct bflb_device_s *uart0_dev;
 struct bflb_device_s *uart1_dev;
 
 extern void bflb_uart_set_console(struct bflb_device_s *dev);
+int joy_choice(int start_line, int len, int *active);
 
 // USB and fatfs
 struct usbh_msc *msc;
@@ -41,6 +42,30 @@ static void init_gpio_and_uart(void)
 {
     gpio_dev = bflb_device_get_by_name("gpio");
 
+    // deinit all GPIOs
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_0);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_1);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
+
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_10);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_11);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_12);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_13);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_14);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_15);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_16);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_17);
+
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_20);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_21);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_22);
+
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_27);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_28);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_29);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_30);
+
     // JTAG pins
     bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
     bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
@@ -50,11 +75,6 @@ static void init_gpio_and_uart(void)
     /* Core control UART 1 */
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
-    /* Debug UART 0 */
-    // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
-    // if (uart0_active) {
-    //     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
-    // }
 
     /* Set up Core control UART parameters */
     struct bflb_uart_config_s uart1_cfg = {
@@ -70,25 +90,28 @@ static void init_gpio_and_uart(void)
     uart1_dev = bflb_device_get_by_name("uart1");
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
-    /* Redirect standard I/O to UART1 */
-    bflb_uart_set_console(uart1_dev);
 
     /* Set up Debug UART parameters */
-    struct bflb_uart_config_s uart0_cfg = {
-        .baudrate = 115200,    // 115200 baud
-        .data_bits = UART_DATA_BITS_8,
-        .stop_bits = UART_STOP_BITS_1,
-        .parity    = UART_PARITY_NONE,
-        .tx_fifo_threshold = 7,
-        .rx_fifo_threshold = 7,
-        .flow_ctrl = 0,  /* No CTS/RTS flow control */
-    };
+    /* Debug UART 0 */
+    // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
+    // if (uart0_active) {
+    //     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
+    // }
+    // struct bflb_uart_config_s uart0_cfg = {
+    //     .baudrate = 115200,    // 115200 baud
+    //     .data_bits = UART_DATA_BITS_8,
+    //     .stop_bits = UART_STOP_BITS_1,
+    //     .parity    = UART_PARITY_NONE,
+    //     .tx_fifo_threshold = 7,
+    //     .rx_fifo_threshold = 7,
+    //     .flow_ctrl = 0,  /* No CTS/RTS flow control */
+    // };
     /* Get handle to UART0 */
-    uart0_dev = bflb_device_get_by_name("uart0");
+    // uart0_dev = bflb_device_get_by_name("uart0");
     /* Initialize UART1 with the config */
-    bflb_uart_init(uart0_dev, &uart0_cfg);
+    // bflb_uart_init(uart0_dev, &uart0_cfg);
     /* Redirect standard I/O to UART1 */
-    bflb_uart_set_console(uart0_dev);
+    // bflb_uart_set_console(uart0_dev);
 }
 
 static uint32_t uart0_last_time;
@@ -220,7 +243,7 @@ void overlay_message(char *msg, int center) {
     // wait for a keypress
     vTaskDelay(pdMS_TO_TICKS(300));
     for (;;) {
-        int joy1, joy2;
+        uint16_t joy1, joy2;
         get_joypad_states(&joy1, &joy2);
            if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
                break;
@@ -255,7 +278,7 @@ bool load_core(char *fname) {
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
         return false;
-    }    
+    }
 
     FIL fcore;
     res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
@@ -276,16 +299,21 @@ bool load_core(char *fname) {
     }
 
     chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
+    if (chain_len == 0 || (idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138)) {
         overlay_printf("No GW5AT-60 or GW5AST-138 detected\n");
         goto program_free;
     }
+    overlay_cursor(2, 1);
+    overlay_printf("chain[0]=%08x\n", idcodes[0]);
 
-    overlay_status("Reset FPGA");
-    fpgaReset();
+    // overlay_status("Reset FPGA");
+    // fpgaReset();
 
-    overlay_status("Erasing SRAM...");
-    if (!eraseSRAM()) {
+    taskENTER_CRITICAL();
+    bool r = eraseSRAM();
+    taskEXIT_CRITICAL();
+
+    if (!r) {
         overlay_printf("Failed to erase SRAM\n");
         goto program_free;
     }
@@ -302,7 +330,7 @@ bool load_core(char *fname) {
         goto program_free;
     }
 
-    int bytes, sent;
+    UINT bytes, sent=0;
     do {
         f_read(&fcore, buf, 8*1024, &bytes);
         if (bytes == 0) break;
@@ -397,11 +425,11 @@ int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) 
 // dir: initial dir
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
 // file chosen: pwd / file_name[*choice]
-static void menu_loadrom(char *dir, int *choice) {
+static int menu_loadrom(char *dir, int *choice) {
     res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_status("Failed to mount USB drive\n");
-        return;
+        return -1;
     }
 
     int page = 0, pages, total;
@@ -449,7 +477,7 @@ static void menu_loadrom(char *dir, int *choice) {
                     } else {
                         // actually load a ROM
                         *choice = active;
-                        int res = 1;
+                        // int res = 1;
                         
                         // todo: actually load core and rom
                         // pwd determines the type of the ROM
@@ -584,8 +612,8 @@ static void main_task(void *pvParameters)
     }
 }
 
-#define MAIN_TASK_STACK_SIZE  1024
-#define MAIN_TASK_PRIORITY    2
+#define MAIN_TASK_STACK_SIZE  2048
+#define MAIN_TASK_PRIORITY    3
 #define UART1_RX_TASK_STACK_SIZE  512
 #define UART1_RX_TASK_PRIORITY    3
 static TaskHandle_t main_task_handle;
