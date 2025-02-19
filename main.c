@@ -274,6 +274,8 @@ int file_len;		// number of files on this page
 
 
 bool load_core(char *fname) {
+    const int BLOCK_SIZE = 32*1024;
+
     FRESULT res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
@@ -292,7 +294,7 @@ bool load_core(char *fname) {
 
     uint8_t *buf = NULL;
     bool res = false;
-    buf = malloc(8*1024);   // 8KB buffer
+    buf = malloc(BLOCK_SIZE);   // 8KB buffer
     if (!buf) {
         overlay_printf("Cannot malloc buffer\r\n");
         goto load_core_close;
@@ -309,9 +311,7 @@ bool load_core(char *fname) {
     // overlay_status("Reset FPGA");
     // fpgaReset();
 
-    taskENTER_CRITICAL();
     bool r = eraseSRAM();
-    taskEXIT_CRITICAL();
 
     if (!r) {
         overlay_printf("Failed to erase SRAM\n");
@@ -324,16 +324,19 @@ bool load_core(char *fname) {
         goto program_free;
     }    
 
-    overlay_status("Writing...");
+    overlay_status("Writing %u bytes...", len);
     if (!writeSRAM_start()) {
         overlay_printf("Failed to start write SRAM\n");
         goto program_free;
     }
 
-    UINT bytes, sent=0;
-    do {
-        f_read(&fcore, buf, 8*1024, &bytes);
-        if (bytes == 0) break;
+    for (int i = 0; i < len; i += BLOCK_SIZE) {
+        int bytes;
+        f_read(&fcore, buf, BLOCK_SIZE, &bytes);
+        if (bytes != BLOCK_SIZE && bytes != len-i) {
+            overlay_status("Read error, bytes=%d\n", bytes);
+            break;
+        }
 
         // reverse msb/lsb as Gowin bitstream needs to MSB first
         static unsigned char lookup[16] = {
@@ -342,17 +345,20 @@ bool load_core(char *fname) {
         for (int j = 0; j < bytes; j++)
             buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
 
-        bool last = sent + bytes >= len;
+        bool last = i + bytes >= len;
+        if (last)
+            overlay_status("Last block @ %d/%d\r\n", i, len);
         if (!writeSRAM_send(buf, bytes*8, last)) {
-            printf("Failed to send data to SRAM\n");
+            overlay_status("Failed to send data to SRAM\n");
             goto program_free;
         }
-        sent += bytes;
+        if (i % (128*1024) == 0) {
+            overlay_status("Writing %u KB...", i/1024);
+        }
+    } 
 
-    } while (bytes == 8*1024);
- 
     if (!writeSRAM_end()) {
-        printf("Failed to program SRAM\n");
+        overlay_status("Failed to program SRAM\n");
         goto program_free;
     }
 
@@ -487,6 +493,7 @@ static int menu_loadrom(char *dir, int *choice) {
                             strncat(load_fname, file_names[active], 1024);
                             overlay_status("Core: %s", file_names[active]);
                             load_core(load_fname);
+                            return 0;       // return to main menu
                         } else {
                             overlay_message("ROM loading not implemented",1);
                         }
