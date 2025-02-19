@@ -119,7 +119,7 @@ static uint32_t uart0_last_time;
 static void uart0_timeout(void) {
     uint32_t now = bflb_mtimer_get_time_ms();
     if (now - uart0_last_time > 500) {
-        bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
+        // bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
         // bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
         uart0_active = false;
     }
@@ -592,7 +592,7 @@ static void main_task(void *pvParameters)
             // overlay_cursor(0, 27);
             // overlay_printf("joy1=%04x, joy2=%04x", joy1, joy2);
 
-            uart0_timeout();        // necessary to keep JTAG alive
+            // uart0_timeout();        // necessary to keep JTAG alive
 
             int r = joy_choice(11, 6, &choice);
             if (r == 1) break;
