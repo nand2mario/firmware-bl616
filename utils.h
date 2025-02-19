@@ -64,3 +64,7 @@ void overlay_status(const char *fmt, ...);
 void overlay_printf(const char *fmt, ...);
 void overlay_clear(void);
 void overlay_cursor(int x, int y);
+
+extern uint16_t update_crc_16( uint16_t crc, unsigned char c );
+
+

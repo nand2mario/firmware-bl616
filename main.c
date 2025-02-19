@@ -272,15 +272,121 @@ int file_dir[PAGESIZE];
 int file_sizes[PAGESIZE];
 int file_len;		// number of files on this page
 
+// fake load_core
+int load_core0(char *core) {
+    uint32_t addr = 0x100000;
+    uint32_t len = 2410656;
+    uint8_t *buf = NULL;
+    bool res = false;
+    buf = malloc(8*1024);   // 8KB buffer
+    if (!buf) {
+        overlay_status("Cannot malloc buffer\r\n");
+        return 0;
+    }
+
+    if (chain_len == 0)
+        chain_len = detectChain(JTAG_MAX_CHAIN);
+    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
+        overlay_status("No GW5AT-60 or GW5AST-138 detected\n");
+        goto program_free;
+    }
+
+    if (!eraseSRAM()) {
+        overlay_status("Failed to erase SRAM\n");
+        goto program_free;
+    }
+
+    if (!eraseSRAM()) {
+        overlay_status("Failed to erase SRAM 2nd time\n");
+        goto program_free;
+    }    
+
+    if (!writeSRAM_start()) {
+        overlay_status("Failed to start write SRAM\n");
+        goto program_free;
+    }
+
+    for (int i = 0; i < len; i += 8*1024) {
+        bflb_flash_read(addr + i, buf, 8*1024);
+        int bytes = len - i < 8*1024 ? len - i : 8*1024;
+
+        // reverse msb/lsb as Gowin bitstream needs to MSB first
+        static unsigned char lookup[16] = {
+            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
+        for (int j = 0; j < bytes; j++)
+            buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
+
+        bool last = i + bytes >= len;
+        if (!writeSRAM_send(buf, bytes*8, last)) {
+            overlay_status("Failed to send data to SRAM\n");
+            goto program_free;
+        }
+
+    }
+
+    if (!writeSRAM_end()) {
+        overlay_status("Failed to program SRAM\n");
+        goto program_free;
+    }
+
+    // printf("Status after program sram: %x\n", readStatusReg());
+    res = true;
+
+program_free:
+    free(buf);    
+    return res;   
+}
 
 bool load_core(char *fname) {
-    const int BLOCK_SIZE = 32*1024;
+    uint16_t crc = 0;
+    UINT bytes_read;
+    FRESULT res_sd = f_mount(&fs, "usb:", 1);
+    if (res_sd != FR_OK) {
+        overlay_printf("mount fail, res:%d\r\n", res_sd);
+        return false;
+    }
+    FIL fcore;
+    res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
+    if (res_sd != FR_OK) {
+        overlay_printf("open fail, res:%d\r\n", res_sd);
+        return false;
+    }
+    uint8_t *buf = NULL;
+    bool res = false;
+    buf = malloc(8*1024);   // 8KB buffer
+    if (!buf) {
+        overlay_printf("Cannot malloc buffer\r\n");
+        goto load_core_close;
+    }
+    for(;;) {
+        f_read(&fcore, buf, 8*1024, &bytes_read);
+        if (bytes_read == 0) break;
+        for (int i = 0; i < bytes_read; i++)
+            crc = update_crc_16(crc, buf[i]);
+        if (bytes_read < 8*1024) break;
+    }
+    overlay_status("CRC16: %04x", crc);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    free(buf);
+
+load_core_close:
+    f_close(&fcore);
+    return true;
+}
+
+bool load_core1(char *fname) {
+    const int BLOCK_SIZE = 8*1024;
 
     FRESULT res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
         return false;
     }
+    FILINFO fno;
+    f_stat(fname, &fno);
+    int len = fno.fsize;
+    overlay_status("Writing %u bytes...", len);
 
     FIL fcore;
     res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
@@ -288,10 +394,6 @@ bool load_core(char *fname) {
         overlay_printf("open fail, res:%d\r\n", res_sd);
         return false;
     }
-    FILINFO fno;
-    f_stat(fname, &fno);
-    int len = fno.fsize;
-
     uint8_t *buf = NULL;
     bool res = false;
     buf = malloc(BLOCK_SIZE);   // 8KB buffer
@@ -308,12 +410,7 @@ bool load_core(char *fname) {
     overlay_cursor(2, 1);
     overlay_printf("chain[0]=%08x\n", idcodes[0]);
 
-    // overlay_status("Reset FPGA");
-    // fpgaReset();
-
-    bool r = eraseSRAM();
-
-    if (!r) {
+    if (!eraseSRAM()) {
         overlay_printf("Failed to erase SRAM\n");
         goto program_free;
     }
@@ -324,7 +421,6 @@ bool load_core(char *fname) {
         goto program_free;
     }    
 
-    overlay_status("Writing %u bytes...", len);
     if (!writeSRAM_start()) {
         overlay_printf("Failed to start write SRAM\n");
         goto program_free;
@@ -346,15 +442,15 @@ bool load_core(char *fname) {
             buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
 
         bool last = i + bytes >= len;
-        if (last)
-            overlay_status("Last block @ %d/%d\r\n", i, len);
+        // if (last)
+        //     overlay_status("Last block @ %d/%d\r\n", i, len);
         if (!writeSRAM_send(buf, bytes*8, last)) {
             overlay_status("Failed to send data to SRAM\n");
             goto program_free;
         }
-        if (i % (128*1024) == 0) {
-            overlay_status("Writing %u KB...", i/1024);
-        }
+        // if (i % (128*1024) == 0) {
+        //     overlay_status("Writing %u KB...", i/1024);
+        // }
     } 
 
     if (!writeSRAM_end()) {
