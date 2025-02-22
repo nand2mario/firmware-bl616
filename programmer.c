@@ -70,21 +70,21 @@ static int jtag_writeTMS(const uint8_t *tms_buf, uint32_t len, bool flush_buffer
 	if (len == 0) // nothing -> stop
 		return len;
 
-	uint32_t start = get_mcycle();
+	// uint32_t start = get_mcycle();
 	for (uint32_t i = 0; i < len; i++) {
 		int tms = ((tms_buf[i >> 3] & (1 << (i & 7))) ? 1 : 0);
 
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L(); // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
         GPIO_PIN_JTAG_TCK_L();                                      // low  TCK
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
 
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L(); // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
         GPIO_PIN_JTAG_TCK_H();                                      // high TCK
 
         _curr_tms = tms;
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
 	}
     // GPIO_PIN_JTAG_TCK_L();                                          // low  TCK
 	_curr_tdi = tdi;
@@ -92,14 +92,63 @@ static int jtag_writeTMS(const uint8_t *tms_buf, uint32_t len, bool flush_buffer
 	return len;
 }
 
+uint64_t jtag_writetdi_time = 0;	// performance counter
+
+// TMS=GPIO0, TCK=GPIO1, TDO=GPIO2, TDI=GPIO3
+// bit 25 is set, bit 26 is clear
+volatile uint32_t *reg_gpio0 = (volatile uint32_t *)0x200008c4;     // bl616 reference 4.8.5
+volatile uint32_t *reg_gpio1 = (volatile uint32_t *)0x200008c8;
+volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
+volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
+
+// nand2mario: this is the hotspot for JTAG programming and optimized for performance
 static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
-	int tms = _curr_tms;
-	int tdi = _curr_tdi;
+	bool tms = _curr_tms;
+	bool tdi = _curr_tdi;
+	const uint32_t mask_set = (1 << 25);
+	const uint32_t mask_clear = (1 << 26);
+
+	uint64_t time_start = bflb_mtimer_get_time_us();
 
 	if (rx)
 		memset(rx, 0, len / 8);
 
-	uint32_t start = get_mcycle();
+	// uint32_t start = get_mcycle();
+	for (uint32_t i = 0; i < len; i++) {
+		if (end && (i == len - 1)) {
+			tms = 1;
+			*reg_gpio0 |= mask_set;
+		}
+
+		if (tx)
+			tdi = (tx[i >> 3] & (1 << (i & 7)));
+
+		*reg_gpio3 |= tdi ? mask_set : mask_clear;	// set TDI
+		*reg_gpio1 |= mask_clear;					// clock low
+		*reg_gpio1 |= mask_set;						// clock high
+
+		if (rx) {
+			if (jtag_read_tdo() > 0)
+				rx[i >> 3] |= 1 << (i & 7);
+		}
+	}
+	_curr_tms = tms;
+	_curr_tdi = tdi;
+
+	jtag_writetdi_time += bflb_mtimer_get_time_us() - time_start;
+	return len;
+}
+
+static int jtag_writeTDI_slow(const uint8_t *tx, uint8_t *rx, int len, bool end) {
+	int tms = _curr_tms;
+	int tdi = _curr_tdi;
+
+	uint64_t time_start = bflb_mtimer_get_time_us();
+
+	if (rx)
+		memset(rx, 0, len / 8);
+
+	// uint32_t start = get_mcycle();
 	for (uint32_t i = 0; i < len; i++) {
 		if (end && (i == len - 1))
 			tms = 1;
@@ -110,7 +159,7 @@ static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L();     // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
         GPIO_PIN_JTAG_TCK_L();                                          // low  TCK 
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
 
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L();     // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
@@ -123,10 +172,11 @@ static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
 			if (jtag_read_tdo() > 0)
 				rx[i >> 3] |= 1 << (i & 7);
 		}
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
 	}
     // GPIO_PIN_JTAG_TCK_L();                                          // low  TCK
 
+	jtag_writetdi_time += bflb_mtimer_get_time_us() - time_start;
 	return len;
 }
 
@@ -146,17 +196,17 @@ static int flushTMS(bool flush_buffer) {
 
 static int jtag_toggleClk_(uint8_t tms, uint8_t tdi, uint32_t clk_len)
 {
-	uint32_t start = get_mcycle();	
+	// uint32_t start = get_mcycle();	
 	for (uint32_t i = 0; i < clk_len; i++) {
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L();     // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
         GPIO_PIN_JTAG_TCK_L();                                          // low  TCK
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
 
         if (tms) GPIO_PIN_JTAG_TMS_H(); else GPIO_PIN_JTAG_TMS_L();     // send TMS
         if (tdi) GPIO_PIN_JTAG_TDI_H(); else GPIO_PIN_JTAG_TDI_L();     // send TDI
         GPIO_PIN_JTAG_TCK_H();                                          // high TCK
-		start = wait_mcycle(start, JTAG_DELAY);
+		// start = wait_mcycle(start, JTAG_DELAY);
     }
 	_curr_tms = tms;
 	_curr_tdi = tdi;

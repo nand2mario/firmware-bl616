@@ -63,10 +63,10 @@ static void init_gpio_and_uart(void)
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_30);
 
     // JTAG pins
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT    | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT     | GPIO_FLOAT  | GPIO_SMT_EN | GPIO_DRV_1);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
 
     /* Core control UART 1 */
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
@@ -256,6 +256,8 @@ const char *ROM_DIR[] = {
 };
 
 #include "ff.h"
+
+// nand2mario: these USB data structures cannot be CACHED as they are written to by hardware
 USB_NOCACHE_RAM_SECTION FATFS fs;
 USB_NOCACHE_RAM_SECTION FIL fcore;
 #define BLOCK_SIZE (8*1024)
@@ -343,45 +345,59 @@ bool load_core(char *fname) {
         goto load_core_close;
     }
 
+    BYTE *fbuf_cached;
+    fbuf_cached = malloc(BLOCK_SIZE);
+    if (!fbuf_cached) {
+        overlay_printf("Cannot malloc buffer\r\n");
+        goto load_core_close;
+    }
+
     UINT bytes = 0, total = 0;
     taskENTER_CRITICAL();
     uint64_t time_total = bflb_mtimer_get_time_us();
     uint64_t time_jtag = 0, time_flash = 0;
+    extern uint64_t jtag_writetdi_time;
+    uint64_t writetdi_time_start = jtag_writetdi_time;
     for (;;) {
         uint64_t time_flash_start = bflb_mtimer_get_time_us();
         f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
         time_flash += bflb_mtimer_get_time_us() - time_flash_start;
-        overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
-            (uint32_t)f_tell(&fcore), bytes, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
+        // overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
+        //     (uint32_t)f_tell(&fcore), bytes, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
 
         if (bytes == 0) break;
         // reverse msb/lsb as Gowin bitstream needs to MSB first
+        // also copy to cached memory for better performance
         static unsigned char lookup[16] = {
             0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
             0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
         for (int j = 0; j < bytes; j++)
-            fbuf[j] = lookup[fbuf[j] & 0xf] << 4 | lookup[fbuf[j] >> 4];
+            fbuf_cached[j] = lookup[fbuf[j] & 0xf] << 4 | lookup[fbuf[j] >> 4];
 
         total += bytes;
         uint64_t time_jtag_start = bflb_mtimer_get_time_us();
-        if (!writeSRAM_send(fbuf, bytes*8, total >= len)) {
+        if (!writeSRAM_send(fbuf_cached, bytes*8, total >= len)) {
             overlay_status("Failed to send data to SRAM\n");
-            goto load_core_close;
+            goto free_fbuf_cached;
         }
         time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
         if (bytes < BLOCK_SIZE) break;
     } 
     if (!writeSRAM_end()) {
         overlay_status("Failed to program SRAM\n");
-        goto load_core_close;
+        goto free_fbuf_cached;
     }
     taskEXIT_CRITICAL();
 
     time_total = bflb_mtimer_get_time_us() - time_total;
-    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us", time_total, time_jtag, time_flash);
+    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
+        time_flash, jtag_writetdi_time - writetdi_time_start);
 
     // printf("Status after program sram: %x\n", readStatusReg());
     res = true;
+
+free_fbuf_cached:
+    free(fbuf_cached);
 
 load_core_close:
     f_close(&fcore);
@@ -655,6 +671,10 @@ int joy_choice(int start_line, int len, int *active) {
 static void main_task(void *pvParameters)
 {
     uint32_t last_redraw_time = 0;
+    volatile uint32_t *reg_gpio0 = (volatile uint32_t *)0x200008c4;     // bl616 reference 4.8.5
+    volatile uint32_t *reg_gpio1 = (volatile uint32_t *)0x200008c8;
+    volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
+    volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
 
     while (1) {
         bool redraw = true;
@@ -687,6 +707,11 @@ static void main_task(void *pvParameters)
                 overlay_printf(__DATE__);
                 last_redraw_time = now;
                 redraw = false;
+
+                // print some debug stats to UART
+                // overlay_status("Mtimer frequency: %d MHz", bflb_mtimer_get_freq() / 1000000);
+                // overlay_status("CPU frequency: %d MHz", bflb_clk_get_system_clock(BL_SYSTEM_CLOCK_MCU_CLK) / 1000000);
+                // overlay_status("GPIO0-3 status: %08x %08x %08x %08x", *reg_gpio0, *reg_gpio1, *reg_gpio2, *reg_gpio3);
             }
 
             // uint16_t joy1, joy2;
