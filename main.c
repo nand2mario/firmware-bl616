@@ -74,7 +74,7 @@ static void init_gpio_and_uart(void)
 
     /* Set up Core control UART parameters */
     struct bflb_uart_config_s uart1_cfg = {
-        .baudrate = 2000000,    // 2Mbps
+        .baudrate = 1000000,
         .data_bits = UART_DATA_BITS_8,
         .stop_bits = UART_STOP_BITS_1,
         .parity    = UART_PARITY_NONE,
