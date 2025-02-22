@@ -304,7 +304,6 @@ load_core_close:
 }
 
 bool load_core(char *fname) {
-
     FRESULT res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
@@ -315,8 +314,7 @@ bool load_core(char *fname) {
     int len = fno.fsize;
     overlay_status("Writing %u bytes...", len);
 
-    FIL fcore;
-    res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
+    res_sd = f_open(&fcore, fname, FA_READ);
     if (res_sd != FR_OK) {
         overlay_printf("open fail, res:%d\r\n", res_sd);
         return false;
@@ -328,8 +326,6 @@ bool load_core(char *fname) {
         overlay_printf("No GW5AT-60 or GW5AST-138 detected\n");
         goto load_core_close;
     }
-    overlay_cursor(2, 1);
-    overlay_printf("chain[0]=%08x\n", idcodes[0]);
 
     if (!eraseSRAM()) {
         overlay_printf("Failed to erase SRAM\n");
@@ -347,14 +343,18 @@ bool load_core(char *fname) {
         goto load_core_close;
     }
 
-    for (int i = 0; i < len; i += BLOCK_SIZE) {
-        int bytes;
+    UINT bytes = 0, total = 0;
+    taskENTER_CRITICAL();
+    uint64_t time_total = bflb_mtimer_get_time_us();
+    uint64_t time_jtag = 0, time_flash = 0;
+    for (;;) {
+        uint64_t time_flash_start = bflb_mtimer_get_time_us();
         f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
-        if (bytes != BLOCK_SIZE && bytes != len-i) {
-            overlay_status("Read error, bytes=%d\n", bytes);
-            break;
-        }
+        time_flash += bflb_mtimer_get_time_us() - time_flash_start;
+        overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
+            (uint32_t)f_tell(&fcore), bytes, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
 
+        if (bytes == 0) break;
         // reverse msb/lsb as Gowin bitstream needs to MSB first
         static unsigned char lookup[16] = {
             0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
@@ -362,22 +362,23 @@ bool load_core(char *fname) {
         for (int j = 0; j < bytes; j++)
             fbuf[j] = lookup[fbuf[j] & 0xf] << 4 | lookup[fbuf[j] >> 4];
 
-        bool last = i + bytes >= len;
-        // if (last)
-        //     overlay_status("Last block @ %d/%d\r\n", i, len);
-        if (!writeSRAM_send(fbuf, bytes*8, last)) {
+        total += bytes;
+        uint64_t time_jtag_start = bflb_mtimer_get_time_us();
+        if (!writeSRAM_send(fbuf, bytes*8, total >= len)) {
             overlay_status("Failed to send data to SRAM\n");
             goto load_core_close;
         }
-        // if (i % (128*1024) == 0) {
-        //     overlay_status("Writing %u KB...", i/1024);
-        // }
+        time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
+        if (bytes < BLOCK_SIZE) break;
     } 
-
     if (!writeSRAM_end()) {
         overlay_status("Failed to program SRAM\n");
         goto load_core_close;
     }
+    taskEXIT_CRITICAL();
+
+    time_total = bflb_mtimer_get_time_us() - time_total;
+    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us", time_total, time_jtag, time_flash);
 
     // printf("Status after program sram: %x\n", readStatusReg());
     res = true;
