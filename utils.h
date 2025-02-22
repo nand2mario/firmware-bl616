@@ -2,6 +2,9 @@
 
 #include "bflb_gpio.h"
 
+#define DEBUG(...) overlay_printf(__VA_ARGS__)
+// #define DEBUG(...) do {} while(0)
+
 extern struct bflb_device_s *gpio_dev;
 
 #define GPIO_PIN_JTAG_TMS GPIO_PIN_0
@@ -67,4 +70,9 @@ void overlay_cursor(int x, int y);
 
 extern uint16_t update_crc_16( uint16_t crc, unsigned char c );
 
-
+struct core_info {
+    uint32_t id;                    // 1: NES, 2: SNES, 3: GB, 4: GENESIS
+    const char *display_name;
+    const char *rom_dir;            // usb:nes, usb:snes, etc.
+    const char *core_prefix;        // prefix of core file in cores/
+};

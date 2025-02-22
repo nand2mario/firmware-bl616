@@ -30,7 +30,10 @@ bool uart0_active = false;
 // Add these global variables at the top with other globals
 volatile uint16_t joy1_state = 0;
 volatile uint16_t joy2_state = 0;
-SemaphoreHandle_t joy_mutex;
+volatile uint16_t core_id = 0;
+SemaphoreHandle_t state_mutex;              // for all global state access
+
+bool core_running;
 
 void get_joypad_states(uint16_t *joy1, uint16_t *joy2);
 
@@ -246,14 +249,6 @@ void overlay_message(char *msg, int center) {
     }
     vTaskDelay(pdMS_TO_TICKS(300));
 }
-
-const char *ROM_DIR[] = {
-    "usb:nes",
-    "usb:snes",
-    "usb:gba",
-    "usb:genesis",
-    "usb:cores"
-};
 
 #include "ff.h"
 
@@ -535,6 +530,248 @@ int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) 
     return 0;
 }
 
+// query over UART to return if the correct core is loaded
+// wait at most 200ms
+// id: core ID we need
+bool core_ready(const char *core_name, int id) {
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+        core_id = 0;
+        xSemaphoreGive(state_mutex);
+    }
+
+    bflb_uart_putchar(uart1_dev, 0x01);
+    // TODO: use a queue for better performance
+    uint64_t start = bflb_mtimer_get_time_ms();
+    while (bflb_mtimer_get_time_ms() - start < 200) {
+        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+            if (core_id == id) {
+                xSemaphoreGive(state_mutex);
+                return true;
+            }
+            xSemaphoreGive(state_mutex);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    overlay_status("Please load %s core", core_name);
+    return false;
+}
+
+// set loading state
+void core_ctrl(int state) {
+    bflb_uart_putchar(uart1_dev, 6);        // 6 loadingstate[7:0]
+    bflb_uart_putchar(uart1_dev, state);        
+}
+
+// turn overlay on/off
+void overlay(int state) {
+    bflb_uart_putchar(uart1_dev, 8);        // 8 x[7:0]
+    bflb_uart_putchar(uart1_dev, state);        
+}
+
+// return 0 if successful
+int load_nes(const char *fname, int rom) {
+    int r = 1;
+    DEBUG("loadnes start\n");
+
+    // check extension .nes
+    char *p = strcasestr(file_names[rom], ".nes");
+    if (p == NULL) {
+        overlay_status("Only .nes supported");
+        goto loadnes_end;
+    }
+
+    r = f_open(&fcore, fname, FA_READ);
+    if (r) {
+        overlay_status("Cannot open file");
+        goto loadnes_end;
+    }
+    unsigned int off = 0, br, total = 0;
+    unsigned int size = file_sizes[rom];
+
+    // load actual ROM
+    core_ctrl(1);
+    core_running = false;
+
+    // Send rom content
+    if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        overlay_status("Seek failure");
+        goto loadnes_snes_end;
+    }
+
+    // start rom loading command
+    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
+    bflb_uart_putchar(uart1_dev, (size >> 16) & 0xff);  // MSB first
+    bflb_uart_putchar(uart1_dev, (size >> 8) & 0xff);
+    bflb_uart_putchar(uart1_dev, size & 0xff);
+
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+        for (int i = 0; i < br; i ++) {
+            bflb_uart_putchar(uart1_dev, fbuf[i]);
+        }
+        total += br;
+        if ((total & 0xfff) == 0) {	// display progress every 4KB
+            overlay_status("");
+            printf("%d/%dK", total >> 10, size >> 10);
+        }
+    } while (br == 1024);
+
+    DEBUG("loadnes: %d bytes\n", total);
+    overlay_status("Success");
+    core_running = true;
+
+    overlay(0);		// turn off OSD
+
+loadnes_snes_end:
+    core_ctrl(0);   // turn off game loading, this starts the core
+    f_close(&fcore);
+loadnes_end:
+    return r;
+}
+
+// return 0 if snes header is successfully parsed at off
+// typ 0: LoROM, 1: HiROM, 2: ExHiROM
+int parse_snes_header(FIL *fp, int pos, int file_size, int typ, char *hdr,
+                      int *map_ctrl, int *rom_type_header, int *rom_size,
+                      int *ram_size, int *company) {
+    unsigned int br;
+    if (f_lseek(fp, pos))
+        return 1;
+    f_read(fp, hdr, 64, &br);
+    if (br != 64) return 1;
+    int mc = hdr[21];
+    int rom = hdr[23];
+    int ram = hdr[24];
+    int checksum = (hdr[28] << 8) + hdr[29];
+    int checksum_compliment = (hdr[30] << 8) + hdr[31];
+    int reset = (hdr[61] << 8) + hdr[60];
+    int size2 = 1024 << rom;
+
+    overlay_status("size=%d", size2);
+
+    // calc heuristics score
+    int score = 0;		
+    if (size2 >= file_size) score++;
+    if (rom == 1) score++;
+    if (checksum + checksum_compliment == 0xffff) score++;
+    int all_ascii = 1;
+    for (int i = 0; i < 21; i++)
+        if (hdr[i] < 32 || hdr[i] > 127)
+            all_ascii = 0;
+    score += all_ascii;
+
+    DEBUG("pos=%x, type=%d, map_ctrl=%d, rom=%d, ram=%d, checksum=%x, checksum_comp=%x, reset=%x, score=%d\n", 
+            pos, typ, mc, rom, ram, checksum, checksum_compliment, reset, score);
+
+    if (rom < 14 && ram <= 7 && score >= 1 && 
+        reset >= 0x8000 &&				// reset vector position correct
+       ((typ == 0 && (mc & 3) == 0) || 	// normal LoROM
+        (typ == 0 && mc == 0x53)    ||	// contra 3 has 0x53 and LoROM
+        (typ == 1 && (mc & 3) == 1) ||	// HiROM
+        (typ == 2 && (mc & 3) == 2))) {	// ExHiROM
+        *map_ctrl = mc;
+        *rom_type_header = hdr[22];
+        *rom_size = rom;
+        *ram_size = ram;
+        *company = hdr[26];
+        return 0;
+    }
+    return 1;
+}
+
+// TODO: implement bsram backup
+// return 0 if successful
+int load_snes(const char *fname, int rom) {
+    int r = 1;
+    DEBUG("load_snes start");
+
+    // check extension .sfc or .smc
+    char *p = strcasestr(file_names[rom], ".sfc");
+    if (p == NULL)
+        p = strcasestr(file_names[rom], ".smc");
+    if (p == NULL) {
+        overlay_status("Only .smc or .sfc supported");
+        goto loadsnes_end;
+    }
+
+    r = f_open(&fcore, fname, FA_READ);
+    if (r) {
+        overlay_status("Cannot open file");
+        goto loadsnes_end;
+    }
+    unsigned int br, total = 0;
+    int size = file_sizes[rom];
+    int map_ctrl, rom_type_header, rom_size, ram_size, company;
+    // parse SNES header from ROM file
+    int off = size & 0x3ff;		// rom header (0 or 512)
+    int header_pos;
+    DEBUG("off=%d\n", off);
+    
+    header_pos = 0x7fc0 + off;
+    if (parse_snes_header(&fcore, header_pos, size-off, 0, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
+        header_pos = 0xffc0 + off;
+        if (parse_snes_header(&fcore, header_pos, size-off, 1, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
+            header_pos = 0x40ffc0 + off;
+            if (parse_snes_header(&fcore, header_pos, size-off, 2, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
+                overlay_status("Not a SNES ROM file");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                goto loadsnes_close_file;
+            }
+        }
+    }
+
+    // load actual ROM
+    core_ctrl(1);		// enable game loading, this resets SNES
+    core_running = false;
+
+    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
+    bflb_uart_putchar(uart1_dev, (size >> 16) & 0xff);  // MSB first
+    bflb_uart_putchar(uart1_dev, (size >> 8) & 0xff);
+    bflb_uart_putchar(uart1_dev, size & 0xff);
+
+    // Send 64-byte header to snes
+    for (int i = 0; i < 64; i ++) {
+        bflb_uart_putchar(uart1_dev, fbuf[i]);
+    }
+
+    // Send rom content to snes
+    if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        overlay_status("Seek failure");
+        goto loadsnes_snes_end;
+    }
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+        for (int i = 0; i < br; i ++) {
+            bflb_uart_putchar(uart1_dev, fbuf[i]);
+        }
+        total += br;
+        if ((total & 0xffff) == 0) {	// display progress every 64KB
+            overlay_status("%d/%dK", total >> 10, size >> 10);
+            if ((map_ctrl & 3) == 0)
+                overlay_printf(" Lo");
+            else if ((map_ctrl & 3) == 1)
+                overlay_printf(" Hi");
+            else if ((map_ctrl & 3) == 2)
+                overlay_printf(" ExHi");
+            overlay_printf(" ROM=%d RAM=%d", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
+        }
+    } while (br == 1024);
+
+    overlay_status("Success");
+    core_running = true;
+
+    overlay(0);		// turn off OSD
+
+loadsnes_snes_end:
+    core_ctrl(0);	// turn off game loading, this starts SNES
+loadsnes_close_file:
+    f_close(&fcore);
+loadsnes_end:
+    return r;
+}
+
 // dir: initial dir
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
 // file chosen: pwd / file_name[*choice]
@@ -591,13 +828,13 @@ static int menu_loadrom(char *dir, int *choice) {
                         // actually load a ROM
                         *choice = active;
                         // int res = 1;
+                        strncpy(load_fname, pwd, 1024);
+                        strncat(load_fname, "/", 1024);
+                        strncat(load_fname, file_names[active], 1024);
                         
                         // todo: actually load core and rom
                         // pwd determines the type of the ROM
                         if (prefix("usb:cores", pwd)) {
-                            strncpy(load_fname, pwd, 1024);
-                            strncat(load_fname, "/", 1024);
-                            strncat(load_fname, file_names[active], 1024);
                             overlay_status("Core: %s", file_names[active]);
                             if (r == 1)
                                 load_core(load_fname);
@@ -605,7 +842,24 @@ static int menu_loadrom(char *dir, int *choice) {
                                 load_core_crc(load_fname);
                             return 0;       // return to main menu
                         } else {
-                            overlay_message("ROM loading not implemented",1);
+                            if (prefix("usb:nes", pwd)) {
+                                if (core_ready("nestang", 1))
+                                    load_nes(load_fname, active);
+                            } else if (prefix("usb:snes", pwd)) {
+                                if (core_ready("snestang", 2))
+                                    load_snes(load_fname, active);
+                            } else if (prefix("usb:gba", pwd)) {
+                                // if (core_ready("gbatang", 3))
+                                // load_gba(load_fname);
+                                overlay_status("GBA loading not implemented");
+                            } else if (prefix("usb:genesis", pwd)) {
+                                // if (core_ready("mdtang", 4))
+                                // load_genesis(load_fname);
+                                overlay_status("Genesis loading not implemented");
+                            } else {
+                                overlay_status("Unknown dir: %s", pwd);
+                            }
+                            return 0;
                         }
                     }
                 }
@@ -668,6 +922,16 @@ int joy_choice(int start_line, int len, int *active) {
     return 0;
 }
 
+
+// null-terminated list of core info
+struct core_info core_info_list[] = {
+    {1, "NES", "usb:nes", "nestang"},
+    {2, "SNES", "usb:snes", "snestang"},
+    {3, "Game Boy Advance", "usb:gba", "gbatang"},
+    {4, "MegaDrive / Genesis", "usb:genesis", "mdtang"},
+    {0, NULL, NULL}
+};
+
 static void main_task(void *pvParameters)
 {
     uint32_t last_redraw_time = 0;
@@ -679,30 +943,35 @@ static void main_task(void *pvParameters)
     while (1) {
         bool redraw = true;
         int choice = 0;
+        int core_cnt = 0;
         for (;;) {
+            const int line_start = 9;
             uint32_t now = bflb_mtimer_get_time_ms();
             if (now - last_redraw_time > 5000) 
                 redraw = true;
             if (redraw) {
                 overlay_clear();
-                overlay_cursor(2, 9);
+                int line = line_start;
+                overlay_cursor(0, line++);
                 //              01234567890123456789012345678901
-                overlay_printf("=== Welcome to TangCore ===\r\n");
+                overlay_printf("       -== TangCore ==-");
+                line++;
 
-                overlay_cursor(2, 11);
-                overlay_printf("NES\n");
-                overlay_cursor(2, 12);
-                overlay_printf("SNES");
-                overlay_cursor(2, 13);
-                overlay_printf("GBA");
-                overlay_cursor(2, 14);
-                overlay_printf("MegaDrive / Genesis");
-                overlay_cursor(2, 15);
+                // display all cores
+                core_cnt = 0;
+                for (int i = 0; core_info_list[i].id != 0; i++) {
+                    overlay_cursor(2, line++);
+                    overlay_printf("%s", core_info_list[i].display_name);
+                    core_cnt++;
+                }
+
+                overlay_cursor(2, line++);
                 overlay_printf("Cores");
-                overlay_cursor(2, 16);
+                overlay_cursor(2, line++);
                 overlay_printf("Load flash core");
+                line++;
                 
-                overlay_cursor(2, 18);
+                overlay_cursor(2, line++);
                 overlay_printf("Version: ");
                 overlay_printf(__DATE__);
                 last_redraw_time = now;
@@ -714,22 +983,18 @@ static void main_task(void *pvParameters)
                 // overlay_status("GPIO0-3 status: %08x %08x %08x %08x", *reg_gpio0, *reg_gpio1, *reg_gpio2, *reg_gpio3);
             }
 
-            // uint16_t joy1, joy2;
-            // get_joypad_states(&joy1, &joy2);
-            // overlay_cursor(0, 27);
-            // overlay_printf("joy1=%04x, joy2=%04x", joy1, joy2);
-
-            // uart0_timeout();        // necessary to keep JTAG alive
-
-            int r = joy_choice(11, 6, &choice);
+            int r = joy_choice(line_start+2, core_cnt+2, &choice);
             if (r == 1) break;
 
             // vTaskDelay(pdMS_TO_TICKS(200));
         }
 
-        if (choice <= 4) {  // 0: NES, 1: SNES, 2: GBA, 3: MegaDrive / Genesis, 4: Cores
+        if (choice < core_cnt) {  // 0: NES, 1: SNES, 2: GBA, 3: MegaDrive / Genesis
             // Load rom or core from USB drive
-            menu_loadrom(ROM_DIR[choice], &choice);
+            menu_loadrom(core_info_list[choice].rom_dir, &choice);
+        } else if (choice == core_cnt) {
+            // load cores manually
+            menu_loadrom("usb:cores", &choice);
         } else {
             // Options
             load_core_flash();
@@ -753,17 +1018,16 @@ static void uart1_rx_task(void *pvParameters)
 {
     uint8_t buffer[5];
     uint8_t pos = 0;
+    uint8_t type = 0;
     
     while (1) {
         if (bflb_uart_rxavailable(uart1_dev)) {
             uint8_t ch = bflb_uart_getchar(uart1_dev);
             
-            // Start of new packet
-            if (ch == 0x01 && pos == 0) {
+            if ((ch == 0x01 || ch == 0x11) && pos == 0) {        // Start of new packet
                 pos = 1;
-            }
-            // Collect packet data
-            else if (pos > 0 && pos < 5) {
+                type = ch;
+            } else if (type == 0x1 && pos > 0 && pos < 5) {      // periodic joypad state
                 buffer[pos-1] = ch;
                 pos++;
                 
@@ -774,16 +1038,21 @@ static void uart1_rx_task(void *pvParameters)
                     uint16_t joy2 = (buffer[3] << 8) | buffer[2];
                     
                     // Update global state with mutex protection
-                    if (xSemaphoreTake(joy_mutex, portMAX_DELAY) == pdTRUE) {
+                    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
                         joy1_state = joy1;
                         joy2_state = joy2;
-                        xSemaphoreGive(joy_mutex);
+                        xSemaphoreGive(state_mutex);
                     }
                     
                     pos = 0; // Reset for next packet
                 }
-            }
-            else {
+            } else if (type == 0x11 && pos == 1) {           // response to command 1 (get core ID)
+                if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+                    core_id = ch;
+                    xSemaphoreGive(state_mutex);
+                }
+                pos = 0;
+            } else {
                 pos = 0; // Reset if we get out of sync
             }
         }
@@ -800,7 +1069,7 @@ int main(void)
     init_gpio_and_uart();
 
     // Create mutex for joypad states
-    joy_mutex = xSemaphoreCreateMutex();
+    state_mutex = xSemaphoreCreateMutex();
 
     // Initializing USB host...
     usbh_initialize(0, USB_BASE);
@@ -819,9 +1088,9 @@ int main(void)
 // Add this function to safely read the joypad states
 void get_joypad_states(uint16_t *joy1, uint16_t *joy2)
 {
-    if (xSemaphoreTake(joy_mutex, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
         *joy1 = joy1_state;
         *joy2 = joy2_state;
-        xSemaphoreGive(joy_mutex);
+        xSemaphoreGive(state_mutex);
     }
 }
