@@ -556,7 +556,7 @@ bool pollFlag(uint32_t mask, uint32_t value)
 			return false;
 		}
 		timeout++;
-		vTaskDelay(1);
+		// vTaskDelay(1);
 	} while ((status & mask) != value);
 
 	return true;

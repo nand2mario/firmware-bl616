@@ -22,10 +22,6 @@ int joy_choice(int start_line, int len, int *active);
 
 // USB and fatfs
 struct usbh_msc *msc;
-// USB_NOCACHE_RAM_SECTION FATFS fs;
-// USB_NOCACHE_RAM_SECTION FIL fnew;
-// UINT fnum;
-// FRESULT res_sd = 0;
 char load_fname[1024];
 
 // Add function prototype at the top
@@ -261,6 +257,10 @@ const char *ROM_DIR[] = {
 
 #include "ff.h"
 USB_NOCACHE_RAM_SECTION FATFS fs;
+USB_NOCACHE_RAM_SECTION FIL fcore;
+#define BLOCK_SIZE (8*1024)
+static USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
+
 FRESULT res_sd = 0;
 #define PAGESIZE 22
 #define TOPLINE 2
@@ -272,72 +272,6 @@ int file_dir[PAGESIZE];
 int file_sizes[PAGESIZE];
 int file_len;		// number of files on this page
 
-// fake load_core
-int load_core0(char *core) {
-    uint32_t addr = 0x100000;
-    uint32_t len = 2410656;
-    uint8_t *buf = NULL;
-    bool res = false;
-    buf = malloc(8*1024);   // 8KB buffer
-    if (!buf) {
-        overlay_status("Cannot malloc buffer\r\n");
-        return 0;
-    }
-
-    if (chain_len == 0)
-        chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
-        overlay_status("No GW5AT-60 or GW5AST-138 detected\n");
-        goto program_free;
-    }
-
-    if (!eraseSRAM()) {
-        overlay_status("Failed to erase SRAM\n");
-        goto program_free;
-    }
-
-    if (!eraseSRAM()) {
-        overlay_status("Failed to erase SRAM 2nd time\n");
-        goto program_free;
-    }    
-
-    if (!writeSRAM_start()) {
-        overlay_status("Failed to start write SRAM\n");
-        goto program_free;
-    }
-
-    for (int i = 0; i < len; i += 8*1024) {
-        bflb_flash_read(addr + i, buf, 8*1024);
-        int bytes = len - i < 8*1024 ? len - i : 8*1024;
-
-        // reverse msb/lsb as Gowin bitstream needs to MSB first
-        static unsigned char lookup[16] = {
-            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
-            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
-        for (int j = 0; j < bytes; j++)
-            buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
-
-        bool last = i + bytes >= len;
-        if (!writeSRAM_send(buf, bytes*8, last)) {
-            overlay_status("Failed to send data to SRAM\n");
-            goto program_free;
-        }
-
-    }
-
-    if (!writeSRAM_end()) {
-        overlay_status("Failed to program SRAM\n");
-        goto program_free;
-    }
-
-    // printf("Status after program sram: %x\n", readStatusReg());
-    res = true;
-
-program_free:
-    free(buf);    
-    return res;   
-}
-
 bool load_core_crc(char *fname) {
     uint16_t crc = 0;
     UINT bytes_read;
@@ -346,37 +280,28 @@ bool load_core_crc(char *fname) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
         return false;
     }
-    FIL fcore;
-    res_sd = f_open(&fcore, fname, FA_OPEN_EXISTING | FA_READ);
+    res_sd = f_open(&fcore, fname, FA_READ);
     if (res_sd != FR_OK) {
         overlay_printf("open fail, res:%d\r\n", res_sd);
         return false;
     }
-    uint8_t *buf = NULL;
     bool res = false;
-    buf = malloc(8*1024);   // 8KB buffer
-    if (!buf) {
-        overlay_printf("Cannot malloc buffer\r\n");
-        goto load_core_close;
-    }
     for(;;) {
-        f_read(&fcore, buf, 8*1024, &bytes_read);
+        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes_read);
+        overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
+            (uint32_t)f_tell(&fcore), bytes_read, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
         if (bytes_read == 0) break;
         for (int i = 0; i < bytes_read; i++)
-            crc = update_crc_16(crc, buf[i]);
-        if (bytes_read < 8*1024) break;
+            crc = update_crc_16(crc, fbuf[i]);
+        if (bytes_read < BLOCK_SIZE) break;
     }
     overlay_status("CRC16: %04x", crc);
     vTaskDelay(pdMS_TO_TICKS(2000));
-    free(buf);
 
 load_core_close:
     f_close(&fcore);
     return true;
 }
-
-#define BLOCK_SIZE (8*1024)
-static USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
 bool load_core(char *fname) {
 
@@ -460,6 +385,82 @@ bool load_core(char *fname) {
 load_core_close:
     f_close(&fcore);
     return res;
+}
+
+
+// load core from embedded flash
+int load_core_flash() {
+    uint32_t addr = 0x100000;
+    uint32_t len = 2410656;
+    uint8_t *buf = NULL;
+    bool res = false;
+    buf = malloc(8*1024);   // 8KB buffer
+    if (!buf) {
+        overlay_status("Cannot malloc buffer\r\n");
+        return 0;
+    }
+
+    if (chain_len == 0)
+        chain_len = detectChain(JTAG_MAX_CHAIN);
+    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
+        overlay_status("No GW5AT-60 or GW5AST-138 detected\n");
+        goto program_free;
+    }
+
+    if (!eraseSRAM()) {
+        overlay_status("Failed to erase SRAM\n");
+        goto program_free;
+    }
+
+    if (!eraseSRAM()) {
+        overlay_status("Failed to erase SRAM 2nd time\n");
+        goto program_free;
+    }    
+
+    if (!writeSRAM_start()) {
+        overlay_status("Failed to start write SRAM\n");
+        goto program_free;
+    }
+
+    taskENTER_CRITICAL();
+    uint64_t time_total = bflb_mtimer_get_time_us();
+    uint64_t time_jtag = 0, time_flash = 0;
+    for (int i = 0; i < len; i += 8*1024) {
+        uint64_t time_flash_start = bflb_mtimer_get_time_us();
+        bflb_flash_read(addr + i, buf, 8*1024);
+        time_flash += bflb_mtimer_get_time_us() - time_flash_start;
+        int bytes = len - i < 8*1024 ? len - i : 8*1024;
+
+        // reverse msb/lsb as Gowin bitstream needs to MSB first
+        static unsigned char lookup[16] = {
+            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
+        for (int j = 0; j < bytes; j++)
+            buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
+
+        bool last = i + bytes >= len;
+        uint64_t time_jtag_start = bflb_mtimer_get_time_us();
+        if (!writeSRAM_send(buf, bytes*8, last)) {
+            overlay_status("Failed to send data to SRAM\n");
+            goto program_free;
+        }
+        time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
+    }
+    if (!writeSRAM_end()) {
+        overlay_status("Failed to program SRAM\n");
+        goto program_free;
+    }
+    taskEXIT_CRITICAL();
+
+    time_total = bflb_mtimer_get_time_us() - time_total;
+    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us", time_total, time_jtag, time_flash);
+
+    // printf("Status after program sram: %x\n", readStatusReg());
+    res = true;
+
+program_free:
+    free(buf);    
+    return res;   
 }
 
 // starting from `start`, load `len` file names into file_names, 
@@ -551,7 +552,7 @@ static int menu_loadrom(char *dir, int *choice) {
             vTaskDelay(pdMS_TO_TICKS(300));
             while (1) {
                 int r = joy_choice(TOPLINE, file_len, &active /*, OSD_KEY_CODE */);
-                if (r == 1) {
+                if (r == 1 || r == 4) {
                     if (strcmp(pwd, dir) == 0 && page == 0 && active == 0) {
                         // return to main menu
                         return 1;
@@ -581,7 +582,10 @@ static int menu_loadrom(char *dir, int *choice) {
                             strncat(load_fname, "/", 1024);
                             strncat(load_fname, file_names[active], 1024);
                             overlay_status("Core: %s", file_names[active]);
-                            load_core(load_fname);
+                            if (r == 1)
+                                load_core(load_fname);
+                            else
+                                load_core_crc(load_fname);
                             return 0;       // return to main menu
                         } else {
                             overlay_message("ROM loading not implemented",1);
@@ -629,8 +633,10 @@ int joy_choice(int start_line, int len, int *active) {
         return 3;      // previous page
     if ((joy1 & 0x80) || (joy2 & 0x80))
         return 2;      // next page
-    if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
-        return 1;      // confirm
+    if ((joy1 & 0x100) || (joy2 & 0x100))
+        return 4;      // button A pressed
+    if ((joy1 & 0x1) || (joy2 & 0x1))
+        return 1;      // button B pressed
 
     overlay_cursor(0, start_line + (*active));
     overlay_printf(">");
@@ -672,9 +678,8 @@ static void main_task(void *pvParameters)
                 overlay_printf("MegaDrive / Genesis");
                 overlay_cursor(2, 15);
                 overlay_printf("Cores");
-
                 overlay_cursor(2, 16);
-                overlay_printf("Options");
+                overlay_printf("Load flash core");
                 
                 overlay_cursor(2, 18);
                 overlay_printf("Version: ");
@@ -701,7 +706,7 @@ static void main_task(void *pvParameters)
             menu_loadrom(ROM_DIR[choice], &choice);
         } else {
             // Options
-            menu_options();
+            load_core_flash();
         } 
 
         vTaskDelay(pdMS_TO_TICKS(300));
