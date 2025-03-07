@@ -22,3 +22,5 @@ The 2nd line flashes the firmware to BL616. Before executing that, press and hol
 
 For the USB drive, You need an OTG dongle to turn the connector from a "device" one to a "host" one, and provide power at the same time.
 
+Acknowledgements
+* JTAG FPGA programming logic based on [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
