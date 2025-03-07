@@ -4,13 +4,25 @@ import serial
 import time
 import sys
 
-if len(sys.argv) != 2:
-    print("Usage: liveuart.py <port>")
+if len(sys.argv) == 2:
+    mode = '-b'  # default mode
+    port = sys.argv[1]
+elif len(sys.argv) == 3:
+    mode = sys.argv[1]
+    port = sys.argv[2]
+else:
+    print("liveuart.py - utility to view UART traffic by BL616 and FPGA with Sipeed RV-Debugger.")
+    print("Usage: liveuart.py [-b|-f] <com_port>")
+    print("  -b: decode messages from BL616 (default)")
+    print("  -f: decode messages from FPGA ")
     sys.exit(1)
 
-port = sys.argv[1]
+if mode not in ['-b', '-f']:
+    print("Error: Mode must be either -b (BL616) or -f (FPGA)")
+    sys.exit(1)
 
-ser = serial.Serial(port, 1000000)
+ser = serial.Serial(port, 2000000)
+# ser = serial.Serial(port,   1300000)
 
 newline = False
 
@@ -53,10 +65,10 @@ def handle_overlay_state():
     state = ser.read(1)
     print(f"<overlay_state:{state}>")
 
-while True:
+def handle_bl616_command():
     command = ser.read(1)
-    if not command:
-        continue
+    if not command or command == b'\x00':
+        return
         
     if command == b'\x04':  # Command 4 - Cursor Move
         handle_cursor_move()
@@ -72,7 +84,28 @@ while True:
     elif command == b'\x08':  # Command 8 - set overlay state
         handle_overlay_state()
     else:
-        print(f"Unknown command: {command}")
+        print(f"{chr(command[0])}", end="")
+        # print(f"Unknown command: {command}")
+
+def handle_fpga_command():
+    command = ser.read(1)
+    if not command:
+        return
+        
+    if command == b'\x01':  # Response joypad state
+        st = ser.read(4)
+        print(f"<joypad_state:{st.hex()}>")
+    elif command == b'\x11':  # Response core id
+        st = ser.read(1)
+        print(f"<core_id={st}>")
+    else:
+        print(f"Unknown response: {command}")
+
+while True:
+    if mode == '-b':
+        handle_bl616_command()
+    else:
+        handle_fpga_command()
     
 
 

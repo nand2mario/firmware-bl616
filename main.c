@@ -1,46 +1,83 @@
-#include <FreeRTOS.h>
+/*
+ * TangCore firmware for BL616 MCU
+ *
+ * (c) 2025, nand2mario <nand2mario@outlook.com>
+ *
+ * This source code is licensed under the Apache 2.0 license found in the
+ * LICENSE file in the root directory of this source tree. 
+ *
+ */
+
 #include <stdarg.h>
-#include "semphr.h"
-#include "usbh_core.h"
-#include "bflb_gpio.h"
-#include "bflb_uart.h"
+#include <string.h>
+
 #include "board.h"
 #include "bl616_glb.h"
-#include "task.h"
+#include "bflb_gpio.h"
+#include "bflb_uart.h"
+#include "bflb_clock.h"
+#include "bl616_clock.h"
+
+#include "usbh_core.h"
 #include "ff.h"
 
 #include "programmer.h"
 #include "utils.h"
+
+/////////////////////////////////////////////////////////////////////////////////
+// Global state
+
+int option_osd_key = OPTION_OSD_KEY_SELECT_RIGHT;
+int16_t active_core = -1;           // firmware detected this core as active
+bool core_running;                  // a rom is loaded and running on the core
 
 // UART
 struct bflb_device_s *gpio_dev;
 struct bflb_device_s *uart0_dev;
 struct bflb_device_s *uart1_dev;
 
-extern void bflb_uart_set_console(struct bflb_device_s *dev);
-int joy_choice(int start_line, int len, int *active);
-
 // USB and fatfs
 struct usbh_msc *msc;
-char load_fname[1024];
+char fname[1024];
 
-// Add function prototype at the top
-bool uart0_active = false;
-
-// Add these global variables at the top with other globals
+// Tasks and shared state
+TaskHandle_t main_task_handle;
+TaskHandle_t uart1_rx_task_handle;
 volatile uint16_t joy1_state = 0;
 volatile uint16_t joy2_state = 0;
-volatile uint16_t core_id = 0;
+volatile int16_t core_id = -1;
 SemaphoreHandle_t state_mutex;              // for all global state access
 
-bool core_running;
+// Core specific state
+bool gba_bios_loaded;
+bool gba_missing_bios_warned;
 
-void get_joypad_states(uint16_t *joy1, uint16_t *joy2);
+#ifdef TANG_CONSOLE60K
+const char *BOARD_NAME = "console60k";
+#elif defined(TANG_CONSOLE138K)
+const char *BOARD_NAME = "console138k";
+#elif defined(TANG_MEGA60K)
+const char *BOARD_NAME = "mega60k";
+#elif defined(TANG_MEGA138K)
+const char *BOARD_NAME = "mega138k";
+#elif defined(TANG_PRIMER25K)
+const char *BOARD_NAME = "primer25k";
+#elif defined(TANG_NANO20K)
+const char *BOARD_NAME = "nano20k";
+#else
+const char *BOARD_NAME = "unknown";
+#endif
+
+/////////////////////////////////////////////////////////////////////////////////
+// GPIO and UART
 
 static void init_gpio_and_uart(void)
 {
-    gpio_dev = bflb_device_get_by_name("gpio");
+    // turn of UART0
+    uart0_dev = bflb_device_get_by_name("uart0");
+    bflb_uart_deinit(uart0_dev);
 
+    gpio_dev = bflb_device_get_by_name("gpio");
     // deinit all GPIOs
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_0);
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_1);
@@ -65,19 +102,27 @@ static void init_gpio_and_uart(void)
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_29);
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_30);
 
-    // JTAG pins
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-
     /* Core control UART 1 */
+#ifdef TANG_PRIMER25K
+    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_11, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
+    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_10, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
+#elif defined(TANG_NANO20K)
+    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_11, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
+    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_13, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
+#else
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
+#endif
 
     /* Set up Core control UART parameters */
     struct bflb_uart_config_s uart1_cfg = {
-        .baudrate = 1000000,
+        // .baudrate = 1000000,
+#if defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
+        .baudrate = 2000000,
+#else
+        // all other boards have 26Mhz XTAL
+        .baudrate = 2000000 * 40 / 26,
+#endif
         .data_bits = UART_DATA_BITS_8,
         .stop_bits = UART_STOP_BITS_1,
         .parity    = UART_PARITY_NONE,
@@ -89,60 +134,40 @@ static void init_gpio_and_uart(void)
     uart1_dev = bflb_device_get_by_name("uart1");
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
+    bflb_uart_set_console(uart1_dev);       // for debug
 
-    /* Set up Debug UART parameters */
-    /* Debug UART 0 */
-    // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
-    // if (uart0_active) {
-    //     bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
-    // }
-    // struct bflb_uart_config_s uart0_cfg = {
-    //     .baudrate = 115200,    // 115200 baud
-    //     .data_bits = UART_DATA_BITS_8,
-    //     .stop_bits = UART_STOP_BITS_1,
-    //     .parity    = UART_PARITY_NONE,
-    //     .tx_fifo_threshold = 7,
-    //     .rx_fifo_threshold = 7,
-    //     .flow_ctrl = 0,  /* No CTS/RTS flow control */
-    // };
-    /* Get handle to UART0 */
-    // uart0_dev = bflb_device_get_by_name("uart0");
-    /* Initialize UART1 with the config */
-    // bflb_uart_init(uart0_dev, &uart0_cfg);
-    /* Redirect standard I/O to UART1 */
-    // bflb_uart_set_console(uart0_dev);
+    // set JTAG pins to high-Z
+    // interrupts masked, SWGPIO mode, output off, input off, schmitt ON
+    const uint32_t GPIO_HIGH_Z = (1 << 22) | (0xB << 8) | (1 << 1);
+    *reg_gpio_tms = GPIO_HIGH_Z;
+    *reg_gpio_tck = GPIO_HIGH_Z;
+    *reg_gpio_tdo = GPIO_HIGH_Z;
+    *reg_gpio_tdi = GPIO_HIGH_Z;
 }
 
-static uint32_t uart0_last_time;
-// If uart0 is not used for 0.5 second, turn it off to allow JTAG operations
-static void uart0_timeout(void) {
-    uint32_t now = bflb_mtimer_get_time_ms();
-    if (now - uart0_last_time > 500) {
-        // bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
-        // bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
-        uart0_active = false;
-    }
+void enable_jtag_pins(void) {
+    // JTAG pins
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
 }
 
-static void uart0_on(void) {
-    if (!uart0_active) {
-        bflb_gpio_uart_init(gpio_dev, GPIO_PIN_3, GPIO_UART_FUNC_UART0_TX);     // JTAG TDI
-        // bflb_gpio_uart_init(gpio_dev, GPIO_PIN_2, GPIO_UART_FUNC_UART0_RX);     // JTAG TDO
-        uart0_active = true;
-    }
-    uart0_last_time = bflb_mtimer_get_time_ms();
+void disable_jtag_pins(void) {
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TMS);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TCK);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDI);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDO);
 }
 
-void debug_printf(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[256];
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
 
-    // uart0_on();
-    for (int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) 
-        bflb_uart_putchar(uart0_dev, buf[i]);
+/////////////////////////////////////////////////////////////////////////////////
+// Overlay and other core control over UART
+
+int _overlay_on = 1;
+
+int overlay_on() {
+    return _overlay_on;
 }
 
 void overlay_cursor(int col, int row) {
@@ -181,7 +206,7 @@ void overlay_status(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    overlay_cursor(0, 27);
+    overlay_cursor(1, 27);
     overlay_printf(buf);
 }
 
@@ -240,19 +265,75 @@ void overlay_message(char *msg, int center) {
         s++;
     }
     // wait for a keypress
-    vTaskDelay(pdMS_TO_TICKS(300));
+    delay(300);
     for (;;) {
-        uint16_t joy1, joy2;
+        uint16_t joy1=0, joy2=0;
         get_joypad_states(&joy1, &joy2);
-           if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
-               break;
+        if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
+            break;
     }
-    vTaskDelay(pdMS_TO_TICKS(300));
+    delay(300);
 }
 
-#include "ff.h"
+// Add this function to safely read the joypad states
+void get_joypad_states(uint16_t *joy1, uint16_t *joy2)
+{
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+        *joy1 = joy1_state;
+        *joy2 = joy2_state;
+        xSemaphoreGive(state_mutex);
+    }
+}
 
-// nand2mario: these USB data structures cannot be CACHED as they are written to by hardware
+// query over UART to return if the correct core is loaded
+// return >= 0 if request is successful, -1 if timeout (200ms)
+int16_t get_core_id(void) {
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+        core_id = -1;
+        xSemaphoreGive(state_mutex);
+    }
+
+    bflb_uart_putchar(uart1_dev, 0x01);
+    // TODO: use a queue for better performance
+    uint64_t start = bflb_mtimer_get_time_ms();
+    while (bflb_mtimer_get_time_ms() - start < 200) {
+        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+            int16_t res = core_id;
+            if (res >= 0) {
+                xSemaphoreGive(state_mutex);
+                return res;
+            }
+            xSemaphoreGive(state_mutex);
+        }
+        delay(10);
+    }
+    return -1;
+}
+
+// set loading state
+void set_loading_state(int state) {
+    bflb_uart_putchar(uart1_dev, 6);        // 6 loadingstate[7:0]
+    bflb_uart_putchar(uart1_dev, state);        
+}
+
+// turn overlay on/off
+void overlay(int state) {
+    _overlay_on = state;
+    bflb_uart_putchar(uart1_dev, 8);        // 8 x[7:0]
+    bflb_uart_putchar(uart1_dev, state);        
+}
+
+// bring FPGA to a good state by sending a few 0's
+void send_blank_packet(void) {
+    for (int i = 0; i < 8; i++) {
+        bflb_uart_putchar(uart1_dev, 0);
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////
+// Core loading and other file system operations
+
+// nand2mario: these USB data structures cannot be UNCACHED as they are written to by hardware
 USB_NOCACHE_RAM_SECTION FATFS fs;
 USB_NOCACHE_RAM_SECTION FIL fcore;
 #define BLOCK_SIZE (8*1024)
@@ -265,50 +346,24 @@ FRESULT res_sd = 0;
 char pwd[PWD_SIZE];
 // one page of file names to display
 char file_names[PAGESIZE][256];
-int file_dir[PAGESIZE];
-int file_sizes[PAGESIZE];
-int file_len;		// number of files on this page
+int file_dir[PAGESIZE];         // this file is a directory
+int file_sizes[PAGESIZE];       
+int file_len;		            // number of files on this page
 
-bool load_core_crc(char *fname) {
-    uint16_t crc = 0;
-    UINT bytes_read;
-    FRESULT res_sd = f_mount(&fs, "usb:", 1);
-    if (res_sd != FR_OK) {
-        overlay_printf("mount fail, res:%d\r\n", res_sd);
-        return false;
-    }
-    res_sd = f_open(&fcore, fname, FA_READ);
-    if (res_sd != FR_OK) {
-        overlay_printf("open fail, res:%d\r\n", res_sd);
-        return false;
-    }
-    bool res = false;
-    for(;;) {
-        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes_read);
-        overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
-            (uint32_t)f_tell(&fcore), bytes_read, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
-        if (bytes_read == 0) break;
-        for (int i = 0; i < bytes_read; i++)
-            crc = update_crc_16(crc, fbuf[i]);
-        if (bytes_read < BLOCK_SIZE) break;
-    }
-    overlay_status("CRC16: %04x", crc);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-load_core_close:
-    f_close(&fcore);
-    return true;
+uint32_t get_file_size(const char *fname) {
+    FILINFO fno;
+    FRESULT r = f_stat(fname, &fno);
+    if (r != FR_OK) return 0;
+    return fno.fsize;
 }
 
-bool load_core(char *fname) {
+bool load_core(const char *fname) {
     FRESULT res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
         return false;
     }
-    FILINFO fno;
-    f_stat(fname, &fno);
-    int len = fno.fsize;
+    int len = get_file_size(fname);
     overlay_status("Writing %u bytes...", len);
 
     res_sd = f_open(&fcore, fname, FA_READ);
@@ -319,8 +374,11 @@ bool load_core(char *fname) {
     bool res = false;
 
     chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || (idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138)) {
-        overlay_printf("No GW5AT-60 or GW5AST-138 detected\n");
+    if (chain_len == 0 || (    idcodes[0] != IDCODE_GW5AT_60 
+                            && idcodes[0] != IDCODE_GWAST_138
+                            && idcodes[0] != IDCODE_GW5A_25
+                            && idcodes[0] != IDCODE_GW2A_18)) {
+        overlay_printf("No known board detected, IDCODE=%08x\n", idcodes[0]);
         goto load_core_close;
     }
 
@@ -347,12 +405,32 @@ bool load_core(char *fname) {
         goto load_core_close;
     }
 
+#define JTAG_FAST
+
     UINT bytes = 0, total = 0;
-    taskENTER_CRITICAL();
     uint64_t time_total = bflb_mtimer_get_time_us();
     uint64_t time_jtag = 0, time_flash = 0;
     extern uint64_t jtag_writetdi_time;
     uint64_t writetdi_time_start = jtag_writetdi_time;
+#ifdef JTAG_FAST
+    taskENTER_CRITICAL();
+    jtag_enter_gpio_out_mode();
+    for (;;) {
+        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
+        if (bytes == 0) break;
+        total += bytes;
+        jtag_writeTDI_msb_first_gpio_out_mode(fbuf, bytes, total >= len);
+        if (bytes < BLOCK_SIZE) break;
+    }
+    jtag_exit_gpio_out_mode();
+    if (!writeSRAM_end()) {
+        overlay_status("Failed to program SRAM\n");
+        goto load_core_close;
+    }
+    taskEXIT_CRITICAL();
+
+#else
+    taskENTER_CRITICAL();
     for (;;) {
         uint64_t time_flash_start = bflb_mtimer_get_time_us();
         f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
@@ -384,6 +462,9 @@ bool load_core(char *fname) {
     }
     taskEXIT_CRITICAL();
 
+    free(fbuf_cached);
+#endif
+
     time_total = bflb_mtimer_get_time_us() - time_total;
     overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
         time_flash, jtag_writetdi_time - writetdi_time_start);
@@ -391,88 +472,9 @@ bool load_core(char *fname) {
     // printf("Status after program sram: %x\n", readStatusReg());
     res = true;
 
-free_fbuf_cached:
-    free(fbuf_cached);
-
 load_core_close:
     f_close(&fcore);
     return res;
-}
-
-
-// load core from embedded flash
-int load_core_flash() {
-    uint32_t addr = 0x100000;
-    uint32_t len = 2410656;
-    uint8_t *buf = NULL;
-    bool res = false;
-    buf = malloc(8*1024);   // 8KB buffer
-    if (!buf) {
-        overlay_status("Cannot malloc buffer\r\n");
-        return 0;
-    }
-
-    if (chain_len == 0)
-        chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || idcodes[0] != IDCODE_GW5AT_60 && idcodes[0] != IDCODE_GWAST_138) {
-        overlay_status("No GW5AT-60 or GW5AST-138 detected\n");
-        goto program_free;
-    }
-
-    if (!eraseSRAM()) {
-        overlay_status("Failed to erase SRAM\n");
-        goto program_free;
-    }
-
-    if (!eraseSRAM()) {
-        overlay_status("Failed to erase SRAM 2nd time\n");
-        goto program_free;
-    }    
-
-    if (!writeSRAM_start()) {
-        overlay_status("Failed to start write SRAM\n");
-        goto program_free;
-    }
-
-    taskENTER_CRITICAL();
-    uint64_t time_total = bflb_mtimer_get_time_us();
-    uint64_t time_jtag = 0, time_flash = 0;
-    for (int i = 0; i < len; i += 8*1024) {
-        uint64_t time_flash_start = bflb_mtimer_get_time_us();
-        bflb_flash_read(addr + i, buf, 8*1024);
-        time_flash += bflb_mtimer_get_time_us() - time_flash_start;
-        int bytes = len - i < 8*1024 ? len - i : 8*1024;
-
-        // reverse msb/lsb as Gowin bitstream needs to MSB first
-        static unsigned char lookup[16] = {
-            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
-            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
-        for (int j = 0; j < bytes; j++)
-            buf[j] = lookup[buf[j] & 0xf] << 4 | lookup[buf[j] >> 4];
-
-        bool last = i + bytes >= len;
-        uint64_t time_jtag_start = bflb_mtimer_get_time_us();
-        if (!writeSRAM_send(buf, bytes*8, last)) {
-            overlay_status("Failed to send data to SRAM\n");
-            goto program_free;
-        }
-        time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
-    }
-    if (!writeSRAM_end()) {
-        overlay_status("Failed to program SRAM\n");
-        goto program_free;
-    }
-    taskEXIT_CRITICAL();
-
-    time_total = bflb_mtimer_get_time_us() - time_total;
-    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us", time_total, time_jtag, time_flash);
-
-    // printf("Status after program sram: %x\n", readStatusReg());
-    res = true;
-
-program_free:
-    free(buf);    
-    return res;   
 }
 
 // starting from `start`, load `len` file names into file_names, 
@@ -530,51 +532,25 @@ int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) 
     return 0;
 }
 
-// query over UART to return if the correct core is loaded
-// wait at most 200ms
-// id: core ID we need
-bool core_ready(const char *core_name, int id) {
-    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-        core_id = 0;
-        xSemaphoreGive(state_mutex);
+// Send a romdata packet to core of len bytes in `fbuf`
+void send_fbuf_data(int len) {
+    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
+    bflb_uart_putchar(uart1_dev, (len >> 16) & 0xff);  // MSB first
+    bflb_uart_putchar(uart1_dev, (len >> 8) & 0xff);
+    bflb_uart_putchar(uart1_dev, len & 0xff);
+    for (int i = 0; i < len; i ++) {
+        bflb_uart_putchar(uart1_dev, fbuf[i]);
     }
-
-    bflb_uart_putchar(uart1_dev, 0x01);
-    // TODO: use a queue for better performance
-    uint64_t start = bflb_mtimer_get_time_ms();
-    while (bflb_mtimer_get_time_ms() - start < 200) {
-        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-            if (core_id == id) {
-                xSemaphoreGive(state_mutex);
-                return true;
-            }
-            xSemaphoreGive(state_mutex);
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    overlay_status("Please load %s core", core_name);
-    return false;
 }
 
-// set loading state
-void core_ctrl(int state) {
-    bflb_uart_putchar(uart1_dev, 6);        // 6 loadingstate[7:0]
-    bflb_uart_putchar(uart1_dev, state);        
-}
-
-// turn overlay on/off
-void overlay(int state) {
-    bflb_uart_putchar(uart1_dev, 8);        // 8 x[7:0]
-    bflb_uart_putchar(uart1_dev, state);        
-}
-
+// Load a NES ROM
 // return 0 if successful
-int load_nes(const char *fname, int rom) {
+int loadnes(const char *fname) {
     int r = 1;
     DEBUG("loadnes start\n");
 
     // check extension .nes
-    char *p = strcasestr(file_names[rom], ".nes");
+    char *p = strcasestr(fname, ".nes");
     if (p == NULL) {
         overlay_status("Only .nes supported");
         goto loadnes_end;
@@ -586,10 +562,10 @@ int load_nes(const char *fname, int rom) {
         goto loadnes_end;
     }
     unsigned int off = 0, br, total = 0;
-    unsigned int size = file_sizes[rom];
+    unsigned int size = get_file_size(fname);
 
     // load actual ROM
-    core_ctrl(1);
+    set_loading_state(1);
     core_running = false;
 
     // Send rom content
@@ -598,24 +574,18 @@ int load_nes(const char *fname, int rom) {
         goto loadnes_snes_end;
     }
 
-    // start rom loading command
-    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
-    bflb_uart_putchar(uart1_dev, (size >> 16) & 0xff);  // MSB first
-    bflb_uart_putchar(uart1_dev, (size >> 8) & 0xff);
-    bflb_uart_putchar(uart1_dev, size & 0xff);
 
     do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+        if ((r = f_read(&fcore, fbuf, BLOCK_SIZE, &br)) != FR_OK)
             break;
-        for (int i = 0; i < br; i ++) {
-            bflb_uart_putchar(uart1_dev, fbuf[i]);
-        }
+        // start rom loading command
+        send_fbuf_data(br);
         total += br;
         if ((total & 0xfff) == 0) {	// display progress every 4KB
-            overlay_status("");
-            printf("%d/%dK", total >> 10, size >> 10);
+            //              01234567890123456789012345678901
+            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
         }
-    } while (br == 1024);
+    } while (br == BLOCK_SIZE);
 
     DEBUG("loadnes: %d bytes\n", total);
     overlay_status("Success");
@@ -624,7 +594,7 @@ int load_nes(const char *fname, int rom) {
     overlay(0);		// turn off OSD
 
 loadnes_snes_end:
-    core_ctrl(0);   // turn off game loading, this starts the core
+    set_loading_state(0);   // turn off game loading, this starts the core
     f_close(&fcore);
 loadnes_end:
     return r;
@@ -632,7 +602,7 @@ loadnes_end:
 
 // return 0 if snes header is successfully parsed at off
 // typ 0: LoROM, 1: HiROM, 2: ExHiROM
-int parse_snes_header(FIL *fp, int pos, int file_size, int typ, char *hdr,
+int parse_snes_header(FIL *fp, int pos, int file_size, int typ, unsigned char *hdr,
                       int *map_ctrl, int *rom_type_header, int *rom_size,
                       int *ram_size, int *company) {
     unsigned int br;
@@ -661,7 +631,7 @@ int parse_snes_header(FIL *fp, int pos, int file_size, int typ, char *hdr,
             all_ascii = 0;
     score += all_ascii;
 
-    DEBUG("pos=%x, type=%d, map_ctrl=%d, rom=%d, ram=%d, checksum=%x, checksum_comp=%x, reset=%x, score=%d\n", 
+    overlay_status("pos=%x, type=%d, map_ctrl=%d, rom=%d, ram=%d, checksum=%x, checksum_comp=%x, reset=%x, score=%d\n", 
             pos, typ, mc, rom, ram, checksum, checksum_compliment, reset, score);
 
     if (rom < 14 && ram <= 7 && score >= 1 && 
@@ -682,14 +652,14 @@ int parse_snes_header(FIL *fp, int pos, int file_size, int typ, char *hdr,
 
 // TODO: implement bsram backup
 // return 0 if successful
-int load_snes(const char *fname, int rom) {
+int loadsnes(const char *fname) {
     int r = 1;
-    DEBUG("load_snes start");
+    DEBUG("loadsnes start");
 
     // check extension .sfc or .smc
-    char *p = strcasestr(file_names[rom], ".sfc");
+    char *p = strcasestr(fname, ".sfc");
     if (p == NULL)
-        p = strcasestr(file_names[rom], ".smc");
+        p = strcasestr(fname, ".smc");
     if (p == NULL) {
         overlay_status("Only .smc or .sfc supported");
         goto loadsnes_end;
@@ -701,12 +671,12 @@ int load_snes(const char *fname, int rom) {
         goto loadsnes_end;
     }
     unsigned int br, total = 0;
-    int size = file_sizes[rom];
+    int size = get_file_size(fname);
     int map_ctrl, rom_type_header, rom_size, ram_size, company;
     // parse SNES header from ROM file
     int off = size & 0x3ff;		// rom header (0 or 512)
     int header_pos;
-    DEBUG("off=%d\n", off);
+    overlay_status("snes rom header offset: %d\n", off);
     
     header_pos = 0x7fc0 + off;
     if (parse_snes_header(&fcore, header_pos, size-off, 0, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
@@ -715,25 +685,18 @@ int load_snes(const char *fname, int rom) {
             header_pos = 0x40ffc0 + off;
             if (parse_snes_header(&fcore, header_pos, size-off, 2, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
                 overlay_status("Not a SNES ROM file");
-                vTaskDelay(pdMS_TO_TICKS(200));
+                delay(200);
                 goto loadsnes_close_file;
             }
         }
     }
 
     // load actual ROM
-    core_ctrl(1);		// enable game loading, this resets SNES
+    set_loading_state(1);		// enable game loading, this resets SNES
     core_running = false;
 
-    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
-    bflb_uart_putchar(uart1_dev, (size >> 16) & 0xff);  // MSB first
-    bflb_uart_putchar(uart1_dev, (size >> 8) & 0xff);
-    bflb_uart_putchar(uart1_dev, size & 0xff);
-
     // Send 64-byte header to snes
-    for (int i = 0; i < 64; i ++) {
-        bflb_uart_putchar(uart1_dev, fbuf[i]);
-    }
+    send_fbuf_data(64);
 
     // Send rom content to snes
     if ((r = f_lseek(&fcore, off)) != FR_OK) {
@@ -741,11 +704,10 @@ int load_snes(const char *fname, int rom) {
         goto loadsnes_snes_end;
     }
     do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+        if ((r = f_read(&fcore, fbuf, BLOCK_SIZE, &br)) != FR_OK)
             break;
-        for (int i = 0; i < br; i ++) {
-            bflb_uart_putchar(uart1_dev, fbuf[i]);
-        }
+        if (br == 0) break;
+        send_fbuf_data(br);
         total += br;
         if ((total & 0xffff) == 0) {	// display progress every 64KB
             overlay_status("%d/%dK", total >> 10, size >> 10);
@@ -755,9 +717,10 @@ int load_snes(const char *fname, int rom) {
                 overlay_printf(" Hi");
             else if ((map_ctrl & 3) == 2)
                 overlay_printf(" ExHi");
-            overlay_printf(" ROM=%d RAM=%d", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
+            //              01234567890123456789012345678901
+            overlay_printf(" ROM=%d RAM=%d                 ", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
         }
-    } while (br == 1024);
+    } while (br == BLOCK_SIZE);
 
     overlay_status("Success");
     core_running = true;
@@ -765,17 +728,168 @@ int load_snes(const char *fname, int rom) {
     overlay(0);		// turn off OSD
 
 loadsnes_snes_end:
-    core_ctrl(0);	// turn off game loading, this starts SNES
+    set_loading_state(0);	// turn off game loading, this starts SNES
 loadsnes_close_file:
     f_close(&fcore);
 loadsnes_end:
     return r;
 }
 
+// check if gba_bios.bin is present in the root directory
+// if not, warn user, if present, load it
+void gba_load_bios() {
+    if (gba_bios_loaded | gba_missing_bios_warned) return;
+
+    DEBUG("gba_load_bios start\n");
+    FILINFO fno;
+    if (f_stat("usb:gba/gba_bios.bin", &fno) != FR_OK) {
+        overlay_message( "Cannot find /gba_bios.bin\n"
+                 "Using open source BIOS\n"
+                 "Expect low compatibility", 1);
+        gba_missing_bios_warned = 1;
+        return;
+    }
+
+    int r = 1;
+    unsigned br;
+    if (f_open(&fcore, "usb:gba/gba_bios.bin", FA_READ) != FR_OK) {
+        overlay_message("Cannot open /gba/gba_bios.bin", 1);
+        return;
+    }
+    set_loading_state(4);
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+        send_fbuf_data(br);
+    } while (br == 1024);
+
+    f_close(&fcore);
+    gba_bios_loaded = 1;
+    DEBUG("gba_load_bios end\n");
+}
+
+int loadgba(const char *fname) {
+    DEBUG("loadgba start\n");
+    FRESULT r = -1;
+
+    // check extension .gba
+    char *p = strcasestr(fname, ".gba");
+    if (p == NULL) {
+        overlay_status("Only .gba supported");
+        goto loadgba_end;
+    }
+
+    unsigned int size = get_file_size(fname);
+
+    r = f_open(&fcore, fname, FA_READ);
+    if (r) {
+        overlay_status("Cannot open file");
+        goto loadgba_end;
+    }
+    unsigned int off = 0, br, total = 0;
+
+    // load actual ROM
+    set_loading_state(1);		// enable game loading, this resets GBA
+    core_running = false;
+
+    // Send rom content to gba
+    if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        overlay_status("Seek failure");
+        goto loadgba_close;
+    }
+    // int detect = 0; // 1: past 'EEPR', 2: past 'FLAS', 3: past 'SRAM'
+    // gba_backup_type = GBA_BACKUP_NONE;
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+
+        send_fbuf_data(br);
+        // TODO: do backup type detection
+
+        total += br;
+        if ((total & 0xffff) == 0) {	// display progress every 64KB
+            //              01234567890123456789012345678901
+            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
+        }
+    } while (br == 1024);
+
+    DEBUG("loadgba: %d bytes rom sent.\n", total); 
+
+    gba_load_bios();
+
+    overlay_status("Success");
+    core_running = true;
+
+    overlay(0);		// turn off OSD
+
+loadgba_close:
+    set_loading_state(0);   // turn off game loading, this starts the core
+    f_close(&fcore);
+loadgba_end:
+    return r;
+}
+
+int loadmd(const char *fname) {
+    DEBUG("loadmd start\n");
+    FRESULT r = -1;
+
+    // check extension .bin
+    char *p = strcasestr(fname, ".bin");
+    if (p == NULL) {
+        overlay_status("Only .bin supported");
+        goto loadmd_end;
+    }
+
+    r = f_open(&fcore, fname, FA_READ);
+    if (r) {
+        overlay_status("Cannot open file");
+        goto loadmd_end;
+    }
+    unsigned int off = 0, br, total = 0;
+    unsigned int size = get_file_size(fname);
+
+    // load actual ROM
+    set_loading_state(1);		// enable game loading, this resets the core
+    core_running = false;
+
+    // Send rom content to core
+    if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        overlay_status("Seek failure");
+        goto loadmd_close_file;
+    }
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+        send_fbuf_data(br);
+        total += br;
+        if ((total & 0xfff) == 0) {	// display progress every 4KB
+            //              01234567890123456789012345678901
+            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
+        }
+    } while (br == 1024);
+
+    DEBUG("loadmd: %d bytes\n", total);
+    overlay_status("Success");
+    core_running = true;
+
+    overlay(0);		// turn off OSD
+
+loadmd_close_file:
+    set_loading_state(0);   // turn off game loading, this starts the core
+    f_close(&fcore);
+loadmd_end:
+    return r;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////
+// Menu display and user interaction
+
+// Menus for "NES", "SNES" ... entries
 // dir: initial dir
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
 // file chosen: pwd / file_name[*choice]
-static int menu_loadrom(char *dir, int *choice) {
+static int menu_loadrom(const char *dir) {
     res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_status("Failed to mount USB drive\n");
@@ -803,9 +917,9 @@ static int menu_loadrom(char *dir, int *choice) {
                         overlay_printf("/");
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(300));
+            delay(300);
             while (1) {
-                int r = joy_choice(TOPLINE, file_len, &active /*, OSD_KEY_CODE */);
+                int r = joy_choice(TOPLINE, file_len, &active, OSD_KEY_CODE);
                 if (r == 1 || r == 4) {
                     if (strcmp(pwd, dir) == 0 && page == 0 && active == 0) {
                         // return to main menu
@@ -825,41 +939,80 @@ static int menu_loadrom(char *dir, int *choice) {
                         page = 0;
                         break;
                     } else {
-                        // actually load a ROM
-                        *choice = active;
                         // int res = 1;
-                        strncpy(load_fname, pwd, 1024);
-                        strncat(load_fname, "/", 1024);
-                        strncat(load_fname, file_names[active], 1024);
-                        
-                        // todo: actually load core and rom
+                        strncpy(fname, pwd, 1024);
+                        strncat(fname, "/", 1024);
+                        strncat(fname, file_names[active], 1024);
+
+                        joy1_state = 0; joy2_state = 0; // clear joypad states
+
                         // pwd determines the type of the ROM
                         if (prefix("usb:cores", pwd)) {
                             overlay_status("Core: %s", file_names[active]);
-                            if (r == 1)
-                                load_core(load_fname);
-                            else
-                                load_core_crc(load_fname);
+                            enable_jtag_pins();
+                            load_core(fname);
+                            _overlay_on = 1;                // turn on overlay after core is loaded
+                            disable_jtag_pins();
                             return 0;       // return to main menu
                         } else {
-                            if (prefix("usb:nes", pwd)) {
-                                if (core_ready("nestang", 1))
-                                    load_nes(load_fname, active);
-                            } else if (prefix("usb:snes", pwd)) {
-                                if (core_ready("snestang", 2))
-                                    load_snes(load_fname, active);
-                            } else if (prefix("usb:gba", pwd)) {
-                                // if (core_ready("gbatang", 3))
-                                // load_gba(load_fname);
-                                overlay_status("GBA loading not implemented");
-                            } else if (prefix("usb:genesis", pwd)) {
-                                // if (core_ready("mdtang", 4))
-                                // load_genesis(load_fname);
-                                overlay_status("Genesis loading not implemented");
-                            } else {
-                                overlay_status("Unknown dir: %s", pwd);
+                            bool success = false;
+                            active_core = get_core_id();
+                            // find core info entry
+                            struct core_info *core = NULL;
+                            for (int i = 0; core_info_list[i].id != 0; i++) {
+                                if (prefix(core_info_list[i].rom_dir, pwd)) {
+                                    core = &core_info_list[i];
+                                    overlay_status("ROM for: %s", core->display_name);
+                                }
                             }
-                            return 0;
+
+                            // load core if needed
+                            if (core != NULL) {
+                                if (active_core != core->id) {
+                                    char *fname_core = malloc(1024);
+                                    if (!fname_core) {
+                                        overlay_status("Failed to allocate memory");
+                                        delay(1000);
+                                        break;
+                                    }
+                                    if (find_core_for_board(fname_core, core->core_file)) {
+                                        // load core
+                                        enable_jtag_pins();
+                                        load_core(fname_core);
+                                        _overlay_on = 1;
+                                        disable_jtag_pins();
+
+                                        // allow 2 seconds for core to start
+                                        uint64_t start = bflb_mtimer_get_time_ms();
+                                        while (bflb_mtimer_get_time_ms() - start < 2000) {
+                                            send_blank_packet();
+                                            active_core = get_core_id();
+                                            if (active_core == core->id)
+                                                break;
+                                        }
+                                    } 
+                                    free(fname_core);
+                                }
+
+                                if (active_core == core->id) {
+                                    // Core is ready, load ROM
+                                    overlay_status("Loading ROM: %s", file_names[active]);
+                                    core->load_rom(fname);
+                                    success = true;
+                                    break;
+
+                                    if (!success) {
+                                        overlay_status("No core for: %s", pwd);
+                                    } else {
+                                        overlay_status("ROM loaded");
+                                    }
+                                    break;      // redraw file list
+                                } else {
+                                    overlay_status("Core failed to load");
+                                    delay(1000);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -870,6 +1023,7 @@ static int menu_loadrom(char *dir, int *choice) {
                     page--;
                     break;
                 }
+                delay(10);
             }
         } else {
             overlay_status("Error opening director");
@@ -886,13 +1040,23 @@ static void menu_options(void) {
 
 // // (R L X A RT LT DN UP START SELECT Y B)
 // Return 1 if a button was pressed, 0 otherwise
-int joy_choice(int start_line, int len, int *active) {
+int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     if (*active < 0 || *active >= len)
         *active = 0;
-    uint16_t joy1, joy2;    
+    uint16_t joy1=0, joy2=0;    
     int last = *active;
 
     get_joypad_states(&joy1, &joy2);
+
+    if ((joy1 == overlay_key_code) || (joy2 == overlay_key_code)) {
+        overlay_status("OSD: %s", overlay_on() ? "ON" : "OFF");
+        overlay(!overlay_on());    // toggle OSD
+        delay(300);
+    }
+
+    if (!overlay_on()) {           // stop responding when OSD is off
+        return 0;
+    }
 
     if ((joy1 & 0x10) || (joy2 & 0x10)) {
         if (*active > 0) (*active)--;
@@ -917,103 +1081,61 @@ int joy_choice(int start_line, int len, int *active) {
     if (last != *active) {
         overlay_cursor(0, start_line + last);
         overlay_printf(" ");
-        vTaskDelay(pdMS_TO_TICKS(100));     // button debounce
+        delay(100);     // button debounce
     }    
     return 0;
 }
 
-
 // null-terminated list of core info
 struct core_info core_info_list[] = {
-    {1, "NES", "usb:nes", "nestang"},
-    {2, "SNES", "usb:snes", "snestang"},
-    {3, "Game Boy Advance", "usb:gba", "gbatang"},
-    {4, "MegaDrive / Genesis", "usb:genesis", "mdtang"},
-    {0, NULL, NULL}
+    {1, "NES", "usb:nes", "nestang.bin", loadnes},
+    {2, "SNES", "usb:snes", "snestang.bin", loadsnes},
+    {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
+    {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
+    {0, NULL, NULL, NULL, NULL}
 };
 
-static void main_task(void *pvParameters)
-{
-    uint32_t last_redraw_time = 0;
-    volatile uint32_t *reg_gpio0 = (volatile uint32_t *)0x200008c4;     // bl616 reference 4.8.5
-    volatile uint32_t *reg_gpio1 = (volatile uint32_t *)0x200008c8;
-    volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
-    volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
+// Main menu listing:
+// >0: core id, -1: cores menu, -2: options menu, 0: end of list
+int16_t main_menu_config[] = 
+   {1,2,
+#if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
+    3,4,
+#endif
+    -1, -2, 0};
 
-    while (1) {
-        bool redraw = true;
-        int choice = 0;
-        int core_cnt = 0;
-        for (;;) {
-            const int line_start = 9;
-            uint32_t now = bflb_mtimer_get_time_ms();
-            if (now - last_redraw_time > 5000) 
-                redraw = true;
-            if (redraw) {
-                overlay_clear();
-                int line = line_start;
-                overlay_cursor(0, line++);
-                //              01234567890123456789012345678901
-                overlay_printf("       -== TangCore ==-");
-                line++;
-
-                // display all cores
-                core_cnt = 0;
-                for (int i = 0; core_info_list[i].id != 0; i++) {
-                    overlay_cursor(2, line++);
-                    overlay_printf("%s", core_info_list[i].display_name);
-                    core_cnt++;
-                }
-
-                overlay_cursor(2, line++);
-                overlay_printf("Cores");
-                overlay_cursor(2, line++);
-                overlay_printf("Load flash core");
-                line++;
-                
-                overlay_cursor(2, line++);
-                overlay_printf("Version: ");
-                overlay_printf(__DATE__);
-                last_redraw_time = now;
-                redraw = false;
-
-                // print some debug stats to UART
-                // overlay_status("Mtimer frequency: %d MHz", bflb_mtimer_get_freq() / 1000000);
-                // overlay_status("CPU frequency: %d MHz", bflb_clk_get_system_clock(BL_SYSTEM_CLOCK_MCU_CLK) / 1000000);
-                // overlay_status("GPIO0-3 status: %08x %08x %08x %08x", *reg_gpio0, *reg_gpio1, *reg_gpio2, *reg_gpio3);
-            }
-
-            int r = joy_choice(line_start+2, core_cnt+2, &choice);
-            if (r == 1) break;
-
-            // vTaskDelay(pdMS_TO_TICKS(200));
-        }
-
-        if (choice < core_cnt) {  // 0: NES, 1: SNES, 2: GBA, 3: MegaDrive / Genesis
-            // Load rom or core from USB drive
-            menu_loadrom(core_info_list[choice].rom_dir, &choice);
-        } else if (choice == core_cnt) {
-            // load cores manually
-            menu_loadrom("usb:cores", &choice);
-        } else {
-            // Options
-            load_core_flash();
-        } 
-
-        vTaskDelay(pdMS_TO_TICKS(300));
+// Find a core file in the search order:
+// usb:cores/${BOARD_NAME}/${core_name}
+// usb:cores/${core_name}
+bool find_core_for_board(char *fname, const char *core_name) {
+    // check usb:cores/${BOARD_NAME}/${core_name}
+    strncpy(fname, "usb:cores/", 1024);
+    strncat(fname, BOARD_NAME, 1024);
+    strncat(fname, "/", 1024);
+    strncat(fname, core_name, 1024);
+    FILINFO fno;
+    if (f_stat(fname, &fno) == FR_OK && fno.fsize > 0) {
+        return true;
     }
+
+    // check usb:cores/${core_name}
+    strncpy(fname, "usb:cores/", 1024);
+    strncat(fname, core_name, 1024);
+    if (f_stat(fname, &fno) == FR_OK && fno.fsize > 0) {
+        return true;
+    }
+
+    return false;
 }
 
 #define MAIN_TASK_STACK_SIZE  2048
 #define MAIN_TASK_PRIORITY    3
 #define UART1_RX_TASK_STACK_SIZE  512
 #define UART1_RX_TASK_PRIORITY    3
-static TaskHandle_t main_task_handle;
-static TaskHandle_t uart1_rx_task_handle;
 
 extern void fatfs_usbh_driver_register(void);
 
-// Receive joypad states from the FPGA
+// Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)
 {
     uint8_t buffer[5];
@@ -1060,6 +1182,146 @@ static void uart1_rx_task(void *pvParameters)
     }
 }
 
+// Display main menu and call other menu functions
+static void main_task(void *pvParameters)
+{
+    uint32_t last_redraw_time = 0;
+    // volatile uint32_t *reg_gpio0 = (volatile uint32_t *)0x200008c4;     // bl616 reference 4.8.5
+    // volatile uint32_t *reg_gpio1 = (volatile uint32_t *)0x200008c8;
+    // volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
+    // volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
+
+    // wait for USB drive to be ready
+    overlay_status("Waiting for USB drive...");
+    uint64_t start = bflb_mtimer_get_time_ms();
+    while (f_mount(&fs, "usb:", 1) != FR_OK) {
+        delay(100);
+    }
+    overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+    
+    // load monitor core at startup
+    enable_jtag_pins();
+    if (find_core_for_board(fname, "monitor.bin")) {
+        load_core(fname);
+    } else {
+        overlay_status("No monitor.bin found for board.");
+    }
+    disable_jtag_pins();
+
+    int line_start;
+    int menu_cnt = 0;
+    for (int i = 0; main_menu_config[i] != 0; i++) {
+        menu_cnt++;
+    }
+    line_start = 13 - (menu_cnt+2+2) / 2;       // 2 lines for version, 2 lines for "TangCore"
+
+    while (1) {
+        bool redraw = true;
+        int choice = 0;
+        for (;;) {
+            uint32_t now = bflb_mtimer_get_time_ms();
+            if (active_core == -1) {
+                send_blank_packet();
+                active_core = get_core_id();            // 200ms timeout
+                if (active_core >= 0) redraw = true;    // redraw immediately if core is detected
+            }
+            // if (core < 0) continue;         // do not draw or process input if core is not ready
+            if (now - last_redraw_time > 5000) 
+                redraw = true;
+            if (redraw) {
+                active_core = get_core_id();            // allow jtag to change core underneath us
+                overlay(overlay_on());                  // set correct overlay state
+                overlay_clear();
+
+                int line = line_start;
+                overlay_cursor(0, line++);
+                //              01234567890123456789012345678901
+                overlay_printf("       -== TangCore ==-");
+                line++;
+
+                // display all menu items
+                for (int i = 0; i < menu_cnt; i++) {
+                    overlay_cursor(2, line++);
+                    if (main_menu_config[i] > 0) {
+                        for (int j = 0; core_info_list[j].id != 0; j++) {
+                            if (core_info_list[j].id == main_menu_config[i]) {
+                                overlay_printf("%s", core_info_list[j].display_name);
+                                break;
+                            }
+                        }
+                    } else if (main_menu_config[i] == -1) {
+                        overlay_printf("Cores");
+                    } else if (main_menu_config[i] == -2) {
+                        overlay_printf("Options");
+                    }
+                }
+
+                line++;
+                overlay_cursor(2, line++);
+                overlay_printf("Version: ");
+                overlay_printf(__DATE__);
+                last_redraw_time = now;
+                redraw = false;
+
+                // print some debug stats to UART
+                // uint16_t joy1=0, joy2=0;
+                // get_joypad_states(&joy1, &joy2);
+                // overlay_status("core=%d, j1=%04x, j2=%04x", active_core, joy1, joy2);
+                // overlay_status("Mtimer frequency: %d MHz", bflb_mtimer_get_freq() / 1000000);
+                // overlay_status("CPU frequency: %d MHz", bflb_clk_get_system_clock(BL_SYSTEM_CLOCK_MCU_CLK) / 1000000);
+                // overlay_status("GPIO0-3 status: %08x %08x %08x %08x", *reg_gpio0, *reg_gpio1, *reg_gpio2, *reg_gpio3);
+            }
+
+            int r = joy_choice(line_start+2, menu_cnt, &choice, OSD_KEY_CODE);
+            if (r == 1) break;
+
+            delay(20);
+        }
+
+        if (main_menu_config[choice] > 0) {
+            // Load rom or core from USB drive
+            struct core_info *core = NULL;
+            for (int i = 0; core_info_list[i].id != 0; i++) {
+                if (core_info_list[i].id == main_menu_config[choice]) {
+                    core = &core_info_list[i];
+                    break;
+                }
+            }
+            if (core) 
+                menu_loadrom(core->rom_dir);
+        } else if (main_menu_config[choice] == -1) {
+            // load cores manually
+            menu_loadrom("usb:cores");
+        } else if (main_menu_config[choice] == -2) {
+            // Options
+            menu_options();
+        } 
+
+        delay(300);
+    }
+}
+
+static void print_system_info(void) {
+    // this is viewable with scripts/liveuart.py
+    overlay_status("TangCore %s", __DATE__);
+    overlay_status("TangBoard: %s", BOARD_NAME);
+    overlay_status("System clock: %u MHz", bflb_clk_get_system_clock(BL_SYSTEM_CLOCK_MCU_CLK) / 1000000);
+    // UART registers
+    // Clock comes from XCLK/160M/BCLK and goes through a divider and becomes UART_CLK
+    overlay_status("GLB_UART_CFG0: %08x", BL_RD_WORD(0x20000150));
+    overlay_status("GLB_UART_CFG1: %08x", BL_RD_WORD(0x20000154));
+    overlay_status("GLB_UART_CFG2: %08x", BL_RD_WORD(0x20000158));
+    overlay_status("UART0 clock: %u", Clock_Peripheral_Clock_Get(BL_PERIPHERAL_CLOCK_UART0));
+    overlay_status("UART1 clock: %u", Clock_Peripheral_Clock_Get(BL_PERIPHERAL_CLOCK_UART1));
+
+    // 10.3.5: baudrate = UART_clk / (uart_prd + 1)
+    // This causes memory exception.
+    // overlay_status("UART_BIT_PRD: %08x", BL_RD_WORD(0x40010008));
+    //              01234567890123456789012345678901
+    // overlay_status("                                ");
+}
+
+// Initialize things, then start main_task and uart1_rx_task to do actual work
 int main(void)
 {
     /* Board init */
@@ -1068,13 +1330,18 @@ int main(void)
     // Initialize GPIO and UART
     init_gpio_and_uart();
 
+    print_system_info();
+
     // Create mutex for joypad states
     state_mutex = xSemaphoreCreateMutex();
+
+    overlay_status("Initializing USB host...");
 
     // Initializing USB host...
     usbh_initialize(0, USB_BASE);
     fatfs_usbh_driver_register();
 
+    overlay_status("Creating tasks...");
     // Create the tasks
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
@@ -1085,12 +1352,3 @@ int main(void)
     }
 }
 
-// Add this function to safely read the joypad states
-void get_joypad_states(uint16_t *joy1, uint16_t *joy2)
-{
-    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-        *joy1 = joy1_state;
-        *joy2 = joy2_state;
-        xSemaphoreGive(state_mutex);
-    }
-}

@@ -6,8 +6,16 @@
 
 #define JTAG_MAX_CHAIN 8
 
+// Tang Primer 25K
+#define IDCODE_GW5A_25 0x0001281b
+// Tang Mega/Console 60K
 #define IDCODE_GW5AT_60 0x0001481b
+// Tang Mega/Console/Mega Pro 138K
 #define IDCODE_GWAST_138 0x0001081b
+// Not a current Tang board
+#define IDCODE_GW5AT_138 0x0001181b
+// Tang Nano 20K
+#define IDCODE_GW2A_18 0x0000081b
 
 extern int chain_len;
 extern uint32_t idcodes[];
@@ -29,5 +37,10 @@ extern bool writeSRAM_end();
 extern void fpgaStatus();
 
 extern void fpgaReset();
+
+// for fast programming
+extern void jtag_writeTDI_msb_first_gpio_out_mode(const uint8_t *tx, int bytes, bool end);
+extern void jtag_enter_gpio_out_mode();
+extern void jtag_exit_gpio_out_mode();
 
 #endif

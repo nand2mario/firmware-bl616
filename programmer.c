@@ -1,10 +1,13 @@
 /*
-
-JTAG FPGA programmer based on openFPGALoader.
-
-Author: nand2mario 2025.2
-
-*/
+ * GPIO JTAG programmer for Gowin GW5A and GW2A
+ *
+ * (c) 2025.2, nand2mario
+ *
+ * This source code is licensed under the Apache 2.0 license found in the
+ * LICENSE file in the root directory of this source tree. 
+ *
+ * Based in part on openFPGALoader by Gwenhael Goavec-Merou
+ */
 
 #include <string.h>
 #include "programmer.h"
@@ -94,12 +97,21 @@ static int jtag_writeTMS(const uint8_t *tms_buf, uint32_t len, bool flush_buffer
 
 uint64_t jtag_writetdi_time = 0;	// performance counter
 
-// TMS=GPIO0, TCK=GPIO1, TDO=GPIO2, TDI=GPIO3
+//         TMS  TCK  TDO  TDI 
+// Nano20K: 16   10   14   12
+// Others:   0    1    2    3
 // bit 25 is set, bit 26 is clear
-volatile uint32_t *reg_gpio0 = (volatile uint32_t *)0x200008c4;     // bl616 reference 4.8.5
-volatile uint32_t *reg_gpio1 = (volatile uint32_t *)0x200008c8;
-volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
-volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
+#ifdef TANG_NANO20K
+volatile uint32_t *reg_gpio_tms = (volatile uint32_t *)0x20000904;     // gpio16
+volatile uint32_t *reg_gpio_tck = (volatile uint32_t *)0x200008ec;     // gpio10
+volatile uint32_t *reg_gpio_tdo = (volatile uint32_t *)0x200008fc;	   // gpio14
+volatile uint32_t *reg_gpio_tdi = (volatile uint32_t *)0x200008f4;     // gpio12
+#else
+volatile uint32_t *reg_gpio_tms = (volatile uint32_t *)0x200008c4;     // gpio0, bl616 reference 4.8.5
+volatile uint32_t *reg_gpio_tck = (volatile uint32_t *)0x200008c8;     // gpio1
+volatile uint32_t *reg_gpio_tdo = (volatile uint32_t *)0x200008cc;	   // gpio2
+volatile uint32_t *reg_gpio_tdi = (volatile uint32_t *)0x200008d0;     // gpio3
+#endif
 
 // nand2mario: this is the hotspot for JTAG programming and optimized for performance
 static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
@@ -117,15 +129,15 @@ static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
 	for (uint32_t i = 0; i < len; i++) {
 		if (end && (i == len - 1)) {
 			tms = 1;
-			*reg_gpio0 |= mask_set;
+			*reg_gpio_tms |= mask_set;
 		}
 
 		if (tx)
 			tdi = (tx[i >> 3] & (1 << (i & 7)));
 
-		*reg_gpio3 |= tdi ? mask_set : mask_clear;	// set TDI
-		*reg_gpio1 |= mask_clear;					// clock low
-		*reg_gpio1 |= mask_set;						// clock high
+		*reg_gpio_tdi |= tdi ? mask_set : mask_clear;	// set TDI
+		*reg_gpio_tck |= mask_clear;					// clock low
+		*reg_gpio_tck |= mask_set;						// clock high
 
 		if (rx) {
 			if (jtag_read_tdo() > 0)
@@ -139,6 +151,98 @@ static int jtag_writeTDI(const uint8_t *tx, uint8_t *rx, int len, bool end) {
 	return len;
 }
 
+#define GPIO_INT_MASK    (1<<22)
+#define GPIO_FUNC_SWGPIO (0xB<<8)
+#define GPIO_OUTPUT_EN   (1<<6)
+#define GPIO_INPUT_EN    (1)
+#define GPIO_SCHMITT_EN  (1<<1)
+#define GPIO_DRV_3       (3<<2)
+#define GPIO_MODE_VALUE  (0<<30)
+#define GPIO_MODE_SETCLR (1<<30)
+#define GPIO_MODE_DMA    (2<<30)
+#define GPIO_MODE_DMA_SETCLR (3<<30)
+uint32_t jtag_tms_cfg, jtag_tck_cfg, jtag_tdi_cfg;
+volatile uint32_t *reg_gpio0_31 = (volatile uint32_t *)0x20000ae4;  // gpio_cfg136，Register Controlled GPIO Output Value
+
+// set GPIO0 (TMS), GPIO1 (TCK) and GPIO3 (TDI) as direct output mode
+void jtag_enter_gpio_out_mode() {
+	jtag_tms_cfg = *reg_gpio_tms;
+	jtag_tck_cfg = *reg_gpio_tck;
+	jtag_tdi_cfg = *reg_gpio_tdi;
+	*reg_gpio_tms = GPIO_INT_MASK | GPIO_FUNC_SWGPIO | GPIO_OUTPUT_EN | GPIO_SCHMITT_EN | GPIO_DRV_3;
+	*reg_gpio_tck = GPIO_INT_MASK | GPIO_FUNC_SWGPIO | GPIO_OUTPUT_EN | GPIO_SCHMITT_EN | GPIO_DRV_3;
+	*reg_gpio_tdi = GPIO_INT_MASK | GPIO_FUNC_SWGPIO | GPIO_OUTPUT_EN | GPIO_SCHMITT_EN | GPIO_DRV_3;
+}
+
+// restore GPIO1 and GPIO3 settings
+void jtag_exit_gpio_out_mode() {
+	*reg_gpio_tms = jtag_tms_cfg;
+	*reg_gpio_tck = jtag_tck_cfg;
+	*reg_gpio_tdi = jtag_tdi_cfg;
+}
+
+// nand2mario: this is faster than jtag_writeTDI()
+// 1. avoid data conversion by writing *tx MSB first
+// 2. use GPIO_CFG144 to set GPIO0-3 as output
+void jtag_writeTDI_msb_first_gpio_out_mode(const uint8_t *tx, int bytes, bool end) {
+	for (int i = 0; i < bytes; i++) {
+		uint8_t byte = tx[i];
+#ifdef TANG_NANO20K
+		// bit 7
+		*reg_gpio0_31 = (byte & 0x80) << 5;                // bit 12 (TDI) = data, bit 10 (TCK) = 0
+		*reg_gpio0_31 = ((byte & 0x80) << 5) | (1 << 10);  // bit 12 (TDI) = data, bit 10 (TCK) = 1
+		// bit 6
+		*reg_gpio0_31 = (byte & 0x40) << 6; 
+		*reg_gpio0_31 = ((byte & 0x40) << 6) | (1 << 10); 
+		// bit 5
+		*reg_gpio0_31 = (byte & 0x20) << 7; 
+		*reg_gpio0_31 = ((byte & 0x20) << 7) | (1 << 10); 
+		// bit 4
+		*reg_gpio0_31 = (byte & 0x10) << 8; 
+		*reg_gpio0_31 = ((byte & 0x10) << 8) | (1 << 10); 
+		// bit 3
+		*reg_gpio0_31 = (byte & 0x8) << 9; 
+		*reg_gpio0_31 = ((byte & 0x8) << 9) | (1 << 10); 
+		// bit 2
+		*reg_gpio0_31 = (byte & 0x4) << 10; 
+		*reg_gpio0_31 = ((byte & 0x4) << 10) | (1 << 10); 
+		// bit 1
+		*reg_gpio0_31 = (byte & 0x2) << 11; 
+		*reg_gpio0_31 = ((byte & 0x2) << 11) | (1 << 10); 
+		// bit 0
+		*reg_gpio0_31 = (byte & 0x1) << 12 | (i == bytes-1 && end ? (1 << 16) : 0); 	// bit 16: TMS
+		*reg_gpio0_31 = ((byte & 0x1) << 12) | (1 << 10) | (i == bytes-1 && end ? (1 << 16) : 0); 
+#else
+		// bit 7
+		*reg_gpio0_31 = (byte & 0x80) >> 4;           // bit 3 (TDI) = data, bit 1 (TCK) = 0
+		*reg_gpio0_31 = ((byte & 0x80) >> 4) | 2;     // bit 3 (TDI) = data, bit 1 (TCK) = 1
+		// bit 6
+		*reg_gpio0_31 = (byte & 0x40) >> 3;     
+		*reg_gpio0_31 = ((byte & 0x40) >> 3) | 2; 
+		// bit 5
+		*reg_gpio0_31 = (byte & 0x20) >> 2;     
+		*reg_gpio0_31 = ((byte & 0x20) >> 2) | 2; 
+		// bit 4
+		*reg_gpio0_31 = (byte & 0x10) >> 1;     
+		*reg_gpio0_31 = ((byte & 0x10) >> 1) | 2; 
+		// bit 3
+		*reg_gpio0_31 = (byte & 0x8);     
+		*reg_gpio0_31 = (byte & 0x8) | 2; 
+		// bit 2
+		*reg_gpio0_31 = (byte & 0x4) << 1;     
+		*reg_gpio0_31 = ((byte & 0x4) << 1) | 2; 
+		// bit 1
+		*reg_gpio0_31 = (byte & 0x2) << 2;     
+		*reg_gpio0_31 = ((byte & 0x2) << 2) | 2; 
+		// bit 0
+		*reg_gpio0_31 = ((byte & 0x1) << 3) | (i == bytes-1 && end);  	// TMS=1 if at the end
+		*reg_gpio0_31 = ((byte & 0x1) << 3) | 2 | (i == bytes-1 && end);	// TMS=1 if at the end
+#endif
+	}
+	_curr_tms = end;
+}
+
+/*
 static int jtag_writeTDI_slow(const uint8_t *tx, uint8_t *rx, int len, bool end) {
 	int tms = _curr_tms;
 	int tdi = _curr_tdi;
@@ -179,6 +283,7 @@ static int jtag_writeTDI_slow(const uint8_t *tx, uint8_t *rx, int len, bool end)
 	jtag_writetdi_time += bflb_mtimer_get_time_us() - time_start;
 	return len;
 }
+*/
 
 static int flushTMS(bool flush_buffer) {
 	int ret = 0;
@@ -441,7 +546,7 @@ static int read_write(const uint8_t *tdi, unsigned char *tdo, int len, char last
     return 0;
 }
 
-static int shiftIR_end(unsigned char *tdi, unsigned char *tdo, int irlen, tapState_t end_state)
+static int shiftIR_end(const unsigned char *tdi, unsigned char *tdo, int irlen, tapState_t end_state)
 {
     // display("%s: avant shiftIR\n", __func__);
 
@@ -533,22 +638,22 @@ static int shiftDR(const uint8_t *tdi, unsigned char *tdo, int drlen) {
 #define RELOAD				0x3C
 #define STATUS_REGISTER		0x41
 
-#  define STATUS_CRC_ERROR			(1 << 0)
-#  define STATUS_BAD_COMMAND		(1 << 1)
-#  define STATUS_ID_VERIFY_FAILED	(1 << 2)
-#  define STATUS_TIMEOUT			(1 << 3)
-#  define STATUS_MEMORY_ERASE		(1 << 5)
-#  define STATUS_PREAMBLE			(1 << 6)
-#  define STATUS_SYSTEM_EDIT_MODE	(1 << 7)
-#  define STATUS_PRG_SPIFLASH_DIRECT (1 << 8)
-#  define STATUS_NON_JTAG_CNF_ACTIVE (1 << 10)
-#  define STATUS_BYPASS				(1 << 11)
-#  define STATUS_GOWIN_VLD			(1 << 12)
-#  define STATUS_DONE_FINAL			(1 << 13)
-#  define STATUS_SECURITY_FINAL		(1 << 14)
-#  define STATUS_READY				(1 << 15)
-#  define STATUS_POR				(1 << 16)
-#  define STATUS_FLASH_LOCK			(1 << 17)
+#define STATUS_CRC_ERROR			(1 << 0)
+#define STATUS_BAD_COMMAND		(1 << 1)
+#define STATUS_ID_VERIFY_FAILED	(1 << 2)
+#define STATUS_TIMEOUT			(1 << 3)
+#define STATUS_MEMORY_ERASE		(1 << 5)
+#define STATUS_PREAMBLE			(1 << 6)
+#define STATUS_SYSTEM_EDIT_MODE	(1 << 7)
+#define STATUS_PRG_SPIFLASH_DIRECT (1 << 8)
+#define STATUS_NON_JTAG_CNF_ACTIVE (1 << 10)
+#define STATUS_BYPASS				(1 << 11)
+#define STATUS_GOWIN_VLD			(1 << 12)
+#define STATUS_DONE_FINAL			(1 << 13)
+#define STATUS_SECURITY_FINAL		(1 << 14)
+#define STATUS_READY				(1 << 15)
+#define STATUS_POR				(1 << 16)
+#define STATUS_FLASH_LOCK			(1 << 17)
 
 typedef enum prog_mode {
     NONE_MODE = 0,
@@ -638,6 +743,8 @@ void sendClkUs(unsigned us)
 // ------------------------------------------------------------
 // Public functions
 
+bool is_gw2a;
+
 int detectChain(int max_dev) {
     // char message[256];
     uint8_t rx_buff[4];
@@ -667,6 +774,11 @@ int detectChain(int max_dev) {
 	}
 	set_state(TEST_LOGIC_RESET);
 	flushTMS(true);
+
+	if (chain_len > 0 && idcodes[0] == IDCODE_GW2A_18) {
+		is_gw2a = true;
+	}
+
 	return chain_len;
 }
 
@@ -728,6 +840,8 @@ bool writeSRAM_start() {
 
 	/* 2.2.6.4 */
 	send_command(XFER_WRITE); // transfer configuration data 0x17
+
+	set_state(SHIFT_DR);
 
     // clear checksum
 	// _checksum = 0;
