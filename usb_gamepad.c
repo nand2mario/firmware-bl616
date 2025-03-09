@@ -219,8 +219,8 @@ static void usbh_hid_client_thread(void *arg) {
                 // SNES: R  L  X A RT LT DN UP ST SE Y  B
                 // HID:            Y  B  A  X  UP DN LT RT
                 // EXTRA:                ST SE       R  L
-                *snes = (hid_state & 1) << 11 | (hid_state & 2) << 9 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
-                        (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) << 6 |
+                *snes = (hid_state & 1) << 7 | (hid_state & 2) << 5 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
+                        (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) >> 6 |
                         (hid_extra & 0x01) << 10 | (hid_extra & 0x02) << 10 | (hid_extra & 0x10) >> 2 | (hid_extra & 0x20) >> 2;
                 xSemaphoreGive(state_mutex);
             }

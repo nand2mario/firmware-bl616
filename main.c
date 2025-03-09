@@ -1044,6 +1044,32 @@ static void menu_options(void) {
     // to be implemented
 }
 
+// keep sending HID state to core until OSD is turned on
+static void send_hid_to_core(void) {
+    uint16_t hid1_old = 0, hid2_old = 0;
+    bool first = true;
+    overlay_status("Start sending HID to core...");
+    while (1) {
+        uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
+        get_joypad_states(&joy1, &joy2, &hid1, &hid2);
+        if (first || hid1 != hid1_old || hid2 != hid2_old) {    // send HID if changed
+            bflb_uart_putchar(uart1_dev, 0x09);         
+            bflb_uart_putchar(uart1_dev, hid1 & 0xff);
+            bflb_uart_putchar(uart1_dev, hid1 >> 8);
+            bflb_uart_putchar(uart1_dev, hid2 & 0xff);
+            bflb_uart_putchar(uart1_dev, hid2 >> 8);
+            hid1_old = hid1;
+            hid2_old = hid2;
+            first = false;
+        }
+        if (joy1 == OSD_KEY_CODE || joy2 == OSD_KEY_CODE || hid1 == OSD_KEY_CODE || hid2 == OSD_KEY_CODE) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    overlay_status("Stopped sending HID to core.");
+}
+
 // // (R L X A RT LT DN UP START SELECT Y B)
 // Return 1 if a button was pressed, 0 otherwise
 int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
@@ -1062,7 +1088,8 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
         delay(300);
     }
 
-    if (!overlay_on()) {           // stop responding when OSD is off
+    if (!overlay_on()) {           // keep sending HID state to core when OSD is off
+        send_hid_to_core();
         return 0;
     }
 
@@ -1085,7 +1112,7 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     overlay_printf(">");
 
     overlay_cursor(0, 27);
-    // overlay_printf(" joy1=%04x, joy2=%04x", joy1, joy2);
+    overlay_printf(" j1=%04x j2=%04x h1=%04x h2=%04x", joy1, joy2, hid1, hid2);
     if (last != *active) {
         overlay_cursor(0, start_line + last);
         overlay_printf(" ");
