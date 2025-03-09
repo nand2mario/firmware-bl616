@@ -1111,8 +1111,8 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     overlay_cursor(0, start_line + (*active));
     overlay_printf(">");
 
-    overlay_cursor(0, 27);
-    overlay_printf(" j1=%04x j2=%04x h1=%04x h2=%04x", joy1, joy2, hid1, hid2);
+    // overlay_cursor(0, 27);
+    // overlay_printf(" j1=%04x j2=%04x h1=%04x h2=%04x", joy1, joy2, hid1, hid2);
     if (last != *active) {
         overlay_cursor(0, start_line + last);
         overlay_printf(" ");
