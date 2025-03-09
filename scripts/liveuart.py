@@ -65,6 +65,10 @@ def handle_overlay_state():
     state = ser.read(1)
     print(f"<overlay_state:{state}>")
 
+def handle_hid_to_core():
+    hid = ser.read(4)
+    print(f"<hid: {hid.hex()}>")
+
 def handle_bl616_command():
     command = ser.read(1)
     if not command or command == b'\x00':
@@ -83,6 +87,8 @@ def handle_bl616_command():
         handle_load_data()
     elif command == b'\x08':  # Command 8 - set overlay state
         handle_overlay_state()
+    elif command == b'\x09':  # Command 9 - send HID to core
+        handle_hid_to_core()
     else:
         print(f"{chr(command[0])}", end="")
         # print(f"Unknown command: {command}")
