@@ -1,6 +1,6 @@
 SDK_DEMO_PATH ?= .
-BL_SDK_BASE ?= ../bouffalo_sdk_harbaum
-TANG_BOARD ?= mega60k
+BL_SDK_BASE ?= ../bouffalo_sdk
+TANG_BOARD ?= console60k
 
 export BL_SDK_BASE
 

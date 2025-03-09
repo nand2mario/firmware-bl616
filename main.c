@@ -22,6 +22,7 @@
 #include "ff.h"
 
 #include "programmer.h"
+#include "usb_gamepad.h"
 #include "utils.h"
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -46,6 +47,8 @@ TaskHandle_t uart1_rx_task_handle;
 volatile uint16_t joy1_state = 0;
 volatile uint16_t joy2_state = 0;
 volatile int16_t core_id = -1;
+volatile uint16_t hid1_state = 0;
+volatile uint16_t hid2_state = 0;
 SemaphoreHandle_t state_mutex;              // for all global state access
 
 // Core specific state
@@ -267,20 +270,23 @@ void overlay_message(char *msg, int center) {
     // wait for a keypress
     delay(300);
     for (;;) {
-        uint16_t joy1=0, joy2=0;
-        get_joypad_states(&joy1, &joy2);
+        uint16_t joy1=0, joy2=0, hid1=0, hid2=0;
+        get_joypad_states(&joy1, &joy2, &hid1, &hid2);
+        joy1 |= hid1; joy2 |= hid2;
         if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
             break;
     }
     delay(300);
 }
 
-// Add this function to safely read the joypad states
-void get_joypad_states(uint16_t *joy1, uint16_t *joy2)
+// read joypad states
+void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2)
 {
     if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
         *joy1 = joy1_state;
         *joy2 = joy2_state;
+        *hid1 = hid1_state;
+        *hid2 = hid2_state;
         xSemaphoreGive(state_mutex);
     }
 }
@@ -1043,10 +1049,12 @@ static void menu_options(void) {
 int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     if (*active < 0 || *active >= len)
         *active = 0;
-    uint16_t joy1=0, joy2=0;    
+    uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
     int last = *active;
 
-    get_joypad_states(&joy1, &joy2);
+    get_joypad_states(&joy1, &joy2, &hid1, &hid2);
+    joy1 |= hid1;
+    joy2 |= hid2;
 
     if ((joy1 == overlay_key_code) || (joy2 == overlay_key_code)) {
         overlay_status("OSD: %s", overlay_on() ? "ON" : "OFF");
@@ -1338,8 +1346,9 @@ int main(void)
     overlay_status("Initializing USB host...");
 
     // Initializing USB host...
-    usbh_initialize(0, USB_BASE);
+    usbh_initialize();
     fatfs_usbh_driver_register();
+    usb_gamepad_init();
 
     overlay_status("Creating tasks...");
     // Create the tasks
@@ -1351,4 +1360,3 @@ int main(void)
     while (1) {
     }
 }
-

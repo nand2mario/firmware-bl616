@@ -4,11 +4,11 @@ This is TangCore firmware for the on-board BL616 of Tang Console.
 
 See [this document](https://github.com/nand2mario/tangcore/blob/main/doc/dev.md) for how the firmware works with cores.
 
-This needs Harbaum's patched version of Bouffalo SDK.
+This needs Vossstef's patched version of Bouffalo SDK.
 
 ```
 cd ..
-git clone --recursive https://github.com/harbaum/bouffalo_sdk.git
+git clone --recurse-submodules https://github.com/vossstef/bouffalo_sdk.git
 ```
 
 Then it should build OK.
@@ -24,3 +24,4 @@ For the USB drive, You need an OTG dongle to turn the connector from a "device" 
 
 Acknowledgements
 * JTAG FPGA programming logic based on [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
+* Gamepad support based on Till Harbaum's [FPGA-Companion](https://github.com/harbaum/FPGA-Companion)

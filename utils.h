@@ -88,7 +88,8 @@ void overlay(int on);
 // return true if core is ready. then core_id is set.
 // return false if timeout after 100ms
 bool get_core_status(void);
-void get_joypad_states(uint16_t *joy1, uint16_t *joy2);
+// read joypad states, joy1/2 comes from FPGA, hid1/2 comes from USB
+void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2);
 extern int joy_choice(int start_line, int len, int *active, int overlay_key_code);
 extern void send_blank_packet(void);
 bool find_core_for_board(char *fname, const char *core_name);
