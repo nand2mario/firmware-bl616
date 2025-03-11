@@ -10,7 +10,8 @@
 
 #include "hidparser.h"
 
-#define DEBUG(fmt, ...) printf(fmt, ##__VA_ARGS__)
+void overlay_status(const char *fmt, ...);
+#define DEBUG(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
 
 #define MAX_REPORT_SIZE   8
 #define XBOX_REPORT_SIZE 20
@@ -63,13 +64,30 @@ TaskHandle_t usb_handle;
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t hid_buffer[CONFIG_USBHOST_MAX_HID_CLASS][MAX_REPORT_SIZE];
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE];
 
+// keep a map of joysticks to be able to report
+// them individually
+static uint8_t joystick_map = 0;
+
+uint8_t hid_allocate_joystick(void) {
+    uint8_t idx;
+    for(idx=0;joystick_map & (1<<idx);idx++);
+    joystick_map |= (1<<idx);
+    DEBUG("Allocating joystick %d (map = %02x)", idx, joystick_map);
+    return idx;
+}
+
+void hid_release_joystick(uint8_t idx) {
+    joystick_map &= ~(1<<idx);
+    DEBUG("Releasing joystick %d (map = %02x)", idx, joystick_map);
+}
+
 uint8_t byteScaleAnalog(int16_t xbox_val)
 {
-  // Scale the xbox value from [-32768, 32767] to [1, 255]
-  // Offset by 32768 to get in range [0, 65536], then divide by 256 to get in range [1, 255]
-  uint8_t scale_val = (xbox_val + 32768) / 256;
-  if (scale_val == 0) return 1;
-  return scale_val;
+    // Scale the xbox value from [-32768, 32767] to [1, 255]
+    // Offset by 32768 to get in range [0, 65536], then divide by 256 to get in range [1, 255]
+    uint8_t scale_val = (xbox_val + 32768) / 256;
+    if (scale_val == 0) return 1;
+    return scale_val;
 }
 
 void usbh_hid_callback(void *arg, int nbytes) {
@@ -120,6 +138,11 @@ static void usbh_update(struct usb_config *usb) {
             vTaskDelete( usb->hid_info[i].task_handle );
             DEBUG("HID %d task deleted\n", i);
             usb->hid_info[i].state = STATE_NONE;
+
+            if(usb->hid_info[i].report.type == REPORT_TYPE_JOYSTICK) {
+                DEBUG("Joystick %d gone", usb->hid_info[i].hid_state.joystick.js_index);
+                hid_release_joystick(usb->hid_info[i].hid_state.joystick.js_index);
+            }
         }
     }
 
@@ -140,6 +163,9 @@ static void usbh_update(struct usb_config *usb) {
             vTaskDelete( usb->xbox_info[i].task_handle );
             DEBUG("XBOX %d task deleted\n", i);
             usb->xbox_info[i].state = STATE_NONE;
+
+            DEBUG("Joystick %d is gone", usb->xbox_info[i].js_index);
+            hid_release_joystick(usb->xbox_info[i].js_index);
         }
     }
 }
@@ -151,7 +177,7 @@ static void xbox_parse(struct xbox_info_S *xbox) {
         return;
     }
 
-    uint16_t wButtons = xbox->buffer[3] << 8 | xbox->buffer[2];
+    uint16_t wButtons = xbox->buffer[3] << 8 | xbox->buffer[2]; // Xbox: Y X B A == SNES: X Y A B
 
     // build new state
     unsigned char state =
@@ -200,7 +226,6 @@ static void usbh_hid_client_thread(void *arg) {
     struct hid_info_S *hid = (struct hid_info_S *)arg;
 
     DEBUG("HID client #%d: thread started\n", hid->index);
-    hid->hid_state.joystick.js_index = hid->index;
 
     while(1) {
         int ret = usbh_submit_urb(&hid->class->intin_urb);
@@ -209,20 +234,22 @@ static void usbh_hid_client_thread(void *arg) {
         else {
             // Wait for result
             xSemaphoreTake(hid->sem, 0xffffffffUL);
-            if(hid->nbytes > 0) {
+            if(hid->nbytes > 0) {       // use first two joysticks
                 hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
-                xSemaphoreTake(state_mutex, portMAX_DELAY);
-                volatile uint16_t *snes = hid->index == 0 ? &hid1_state : &hid2_state;
-                uint8_t hid_state = hid->hid_state.joystick.last_state;
-                uint8_t hid_extra = hid->hid_state.joystick.last_state_btn_extra;
-                //       11 10 9 8 7  6  5  4  3  2  1  0
-                // SNES: R  L  X A RT LT DN UP ST SE Y  B
-                // HID:            Y  B  A  X  UP DN LT RT
-                // EXTRA:                ST SE       R  L
-                *snes = (hid_state & 1) << 7 | (hid_state & 2) << 5 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
-                        (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) >> 6 |
-                        (hid_extra & 0x01) << 10 | (hid_extra & 0x02) << 10 | (hid_extra & 0x10) >> 2 | (hid_extra & 0x20) >> 2;
-                xSemaphoreGive(state_mutex);
+                if (hid->hid_state.joystick.js_index < 2) {
+                    xSemaphoreTake(state_mutex, portMAX_DELAY);
+                    volatile uint16_t *snes = hid->hid_state.joystick.js_index == 0 ? &hid1_state : &hid2_state;
+                    uint8_t hid_state = hid->hid_state.joystick.last_state;
+                    uint8_t hid_extra = hid->hid_state.joystick.last_state_btn_extra;
+                    //       11 10 9 8 7  6  5  4  3  2  1  0
+                    // SNES: R  L  X A RT LT DN UP ST SE Y  B
+                    // HID:            Y  B  A  X  UP DN LT RT                     
+                    // EXTRA:                ST SE       R  L
+                    *snes = (hid_state & 1) << 7 | (hid_state & 2) << 5 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
+                            (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) >> 6 |
+                            (hid_extra & 0x01) << 10 | (hid_extra & 0x02) << 10 | (hid_extra & 0x10) >> 2 | (hid_extra & 0x20) >> 2;
+                    xSemaphoreGive(state_mutex);
+                }
             }
             
             hid->nbytes = 0;
@@ -231,27 +258,30 @@ static void usbh_hid_client_thread(void *arg) {
     }
 }
 
+// from fixcontroler.py: https://gist.github.com/adnanh/f60f069fc9185a48b73db9987b9e9108
+struct usb_setup_packet xbox360_init_packet1 = {
+    0xC1, 0x01, 0x0100, 0x00, 0x14
+};
+
 static void usbh_xbox_client_thread(void *arg) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
-    uint8_t xbox360_wired_led[] = {0x01, 0x03, 0x0A};       // command, length, data: 0 is off, 1 is all blinking, 2 is 1 flash then on
-                                                            //                        6 is 1 on, 7 is 2 on, 0xA is rotating
 
     DEBUG("XBOX client #%d: thread started\n", xbox->index);
 
-    usbh_bulk_urb_fill(&xbox->class->intout_urb,
-        xbox->class->hport,
-        xbox->class->intout,
-        xbox360_wired_led,
-        sizeof(xbox360_wired_led),
-        0xfffffff, 
-        NULL,
-        NULL);
+    // 8bitdo SN30pro requires getting the string descriptor for initialization
+    uint8_t *str = malloc(256);
+    if (!str) {
+        DEBUG("XBOX: failed to allocate string descriptor buffer");
+        goto free_str;
+    }
+    if (usbh_get_string_desc(xbox->class->hport, 2, str) < 0)
+        DEBUG("XBOX: getting string descriptor failed");
 
-    int ret = usbh_submit_urb(&xbox->class->intout_urb);
-    if (ret < 0)
-        DEBUG("xbox set_led failed %d\n", ret);
-    else
-        DEBUG("xbox set_led sucess\n");
+    // A lot of xbox 360 compatible controllers require the following initialization packet
+    usbh_control_transfer(xbox->class->hport, &xbox360_init_packet1, str);
+
+free_str:
+    free(str);
 
     while(1) {
         int ret = usbh_submit_urb(&xbox->class->intin_urb);
@@ -260,9 +290,24 @@ static void usbh_xbox_client_thread(void *arg) {
         else {
             // Wait for result
             xSemaphoreTake(xbox->sem, 0xffffffffUL);
-            DEBUG("XBOX client #%d: nbytes %d\n", xbox->index, xbox->nbytes);
-            if (xbox->nbytes == XBOX_REPORT_SIZE)
+            // DEBUG("XBOX client #%d: nbytes %d\n", xbox->index, xbox->nbytes);
+            if (xbox->nbytes == XBOX_REPORT_SIZE) {
                 xbox_parse(xbox);
+
+                if (xbox->js_index < 2) {
+                    xSemaphoreTake(state_mutex, portMAX_DELAY);
+                    volatile uint16_t *snes = xbox->js_index == 0 ? &hid1_state : &hid2_state;  
+                    uint8_t state = xbox->last_state;
+                    uint8_t state_extra = xbox->last_state_btn_extra;
+                    // SNES: R  L  X A RT LT DN UP ST SE Y  B
+                    // XBOX:           X  Y  A  B  UP DN LT RT
+                    // EXTRA:                ST SE       R  L
+                    *snes = (state & 1) << 7 | (state & 2) << 5 | (state & 4) << 3 | (state & 8) << 1 |
+                            (state & 0x10) >> 4 | (state & 0x20) << 3| (state & 0x40) >> 5 | (state & 0x80) << 2 |
+                            (state_extra & 0x01) << 10 | (state_extra & 0x02) << 10 | (state_extra & 0x10) >> 2 | (state_extra & 0x20) >> 2;
+                    xSemaphoreGive(state_mutex);
+                }
+            }
             xbox->nbytes = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -283,6 +328,10 @@ static void usbh_hid_thread(void *argument) {
                 DEBUG("HID device %d is detected\n", i);
                 usb->hid_info[i].state = STATE_RUNNING;
 
+                // allocate a joystick index
+                usb->hid_info[i].hid_state.joystick.js_index = hid_allocate_joystick();
+                DEBUG("  -> joystick %d", usb->hid_info[i].hid_state.joystick.js_index);
+
                 // setup urb
                 usbh_int_urb_fill(&usb->hid_info[i].class->intin_urb,
                         usb->hid_info[i].class->hport,
@@ -296,12 +345,15 @@ static void usbh_hid_thread(void *argument) {
         }
 
         // check for active xbox pads
-/*
         for (int i = 0; i < CONFIG_USBHOST_MAX_XBOX_CLASS; i++) {
             if (usb->xbox_info[i].state == STATE_DETECTED) {
                 DEBUG("XBOX device %d is detected\n", i);
                 usb->xbox_info[i].state = STATE_RUNNING;
                 usb->xbox_info[i].js_index = i;
+
+                // allocate a joystick index
+                usb->xbox_info[i].js_index = hid_allocate_joystick();
+                DEBUG("  -> joystick %d", usb->xbox_info[i].js_index);
 
                 // setup urb
                 usbh_int_urb_fill(&usb->xbox_info[i].class->intin_urb,
@@ -315,7 +367,6 @@ static void usbh_hid_thread(void *argument) {
             }
         }
 
-*/
         // wait for 100ms as this thread only deals with device detection and leaving
         vTaskDelay(pdMS_TO_TICKS(100));
     }
