@@ -61,10 +61,10 @@ static struct usb_config {
         hid_state_t hid_state;
     } hid_info[CONFIG_USBHOST_MAX_HID_CLASS];
 } usb_config;
-
+ 
 TaskHandle_t usb_handle;
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t hid_buffer[CONFIG_USBHOST_MAX_HID_CLASS][MAX_REPORT_SIZE];
-USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE];
+USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE*2];
 
 // keep a map of joysticks to be able to report
 // them individually
@@ -94,15 +94,14 @@ uint8_t byteScaleAnalog(int16_t xbox_val)
 
 void usbh_hid_callback(void *arg, int nbytes) {
     struct hid_info_S *hid = (struct hid_info_S *)arg;
-
-    xSemaphoreGiveFromISR(hid->sem, NULL);
     hid->nbytes = nbytes;
+    xSemaphoreGiveFromISR(hid->sem, NULL);
 }  
 
 void usbh_xbox_callback(void *arg, int nbytes) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
-    xSemaphoreGiveFromISR(xbox->sem, NULL);
     xbox->nbytes = nbytes;
+    xSemaphoreGiveFromISR(xbox->sem, NULL);
 }
 
 #define print_usb_class_info(cls) \
@@ -148,8 +147,11 @@ static void usbh_update(struct usb_config *usb) {
         
         else if(!usb->hid_info[i].class && usb->hid_info[i].state != STATE_NONE) {
             DEBUG("HID %d LOST\n", i);
-            vTaskDelete( usb->hid_info[i].task_handle );
-            DEBUG("HID %d task deleted\n", i);
+            if (usb->hid_info[i].task_handle) {
+                vTaskDelete( usb->hid_info[i].task_handle );
+                usb->hid_info[i].task_handle = NULL;
+                DEBUG("HID %d task deleted\n", i);
+            }
             usb->hid_info[i].state = STATE_NONE;
 
             if(usb->hid_info[i].report.type == REPORT_TYPE_JOYSTICK) {
@@ -178,8 +180,11 @@ static void usbh_update(struct usb_config *usb) {
         
         else if(!usb->xbox_info[i].class && usb->xbox_info[i].state != STATE_NONE) {
             DEBUG("XBOX %d LOST\n", i);
-            vTaskDelete( usb->xbox_info[i].task_handle );
-            DEBUG("XBOX %d task deleted\n", i);
+            if (usb->xbox_info[i].task_handle) {
+                vTaskDelete( usb->xbox_info[i].task_handle );
+                DEBUG("XBOX %d task deleted\n", i);
+                usb->xbox_info[i].task_handle = NULL;
+            }
             usb->xbox_info[i].state = STATE_NONE;
 
             DEBUG("Joystick %d is gone", usb->xbox_info[i].js_index);
@@ -277,35 +282,47 @@ static void usbh_hid_client_thread(void *arg) {
 }
 
 // from fixcontroler.py: https://gist.github.com/adnanh/f60f069fc9185a48b73db9987b9e9108
-struct usb_setup_packet xbox360_init_packet1 = {
-    0xC1, 0x01, 0x0100, 0x00, 0x14
-};
+struct usb_setup_packet xbox_init_packets[5] = {
+    {0x80, 0x06, 0x0302, 0x0409, 2},        // get string descriptor
+    {0x80, 0x06, 0x0302, 0x0409, 32},       // get string descriptor
+    {0xC1, 0x01, 0x0100, 0x0000, 20},       // control transfer 1
+    {0xC1, 0x01, 0x0000, 0x0000, 8},        // control transfer 2
+    {0xC0, 0x01, 0x0100, 0x0000, 4}};       // control transfer 3
+
+// four data packets to EP2
+uint8_t xbox_ep2_packets[4][3] = {{0x01, 0x03, 0x02}, {0x02, 0x08, 0x03}, 
+                                         {0x01, 0x03, 0x02}, {0x01, 0x03, 0x06}};
 
 static void usbh_xbox_client_thread(void *arg) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
+    int ret = 0;
 
-    DEBUG("XBOX client #%d: thread started\n", xbox->index);
+    DEBUG("XBOX client #%d: thread started.\n", xbox->index);
 
     // 8bitdo SN30pro requires getting the string descriptor for initialization
-    uint8_t *str = malloc(256);
-    if (!str) {
-        DEBUG("XBOX: failed to allocate string descriptor buffer");
-        goto free_str;
+    for (int i = 0; i < 4; i++) {       // XXX: last packet causes 8bit wireless adapter to hang
+        if ((ret = usbh_control_transfer(xbox->class->hport, &xbox_init_packets[i], xbox->buffer)) < 0) {
+            DEBUG("XBOX: init packet %d failed: %d", i, ret);
+        }
     }
-    if (usbh_get_string_desc(xbox->class->hport, 2, str) < 0)
-        DEBUG("XBOX: getting string descriptor failed");
-
-    // A lot of xbox 360 compatible controllers require the following initialization packet
-    usbh_control_transfer(xbox->class->hport, &xbox360_init_packet1, str);
-
-free_str:
-    free(str);
+    for (int i = 0; i < 4; i++) {
+        usbh_bulk_urb_fill(&xbox->class->intout_urb,
+            xbox->class->hport,
+            xbox->class->intout,
+            xbox_ep2_packets[i], 3,
+            0, usbh_xbox_callback, xbox);
+        ret = usbh_submit_urb(&xbox->class->intout_urb);
+        if (ret < 0)
+            DEBUG("XBOX FATAL: submit EP2 failed %d", ret);
+        xSemaphoreTake(xbox->sem, 0xffffffffUL);    // wait for callback to finish
+    }
+    DEBUG("XBOX client #%d: all init packets sent, entering main loop.\n", xbox->index);
 
     // setup urb
     usbh_int_urb_fill(&xbox->class->intin_urb,
             xbox->class->hport,
             xbox->class->intin, xbox->buffer,
-            XBOX_REPORT_SIZE,
+            XBOX_REPORT_SIZE*2,
             // 50, NULL, NULL);
             0, usbh_xbox_callback, xbox);
 
@@ -316,9 +333,8 @@ free_str:
         else {
             // Wait for result
             xSemaphoreTake(xbox->sem, 0xffffffffUL);
-            // DEBUG("XBOX client #%d: nbytes %d\n", xbox->index, xbox->nbytes);
-            if (xbox->nbytes == XBOX_REPORT_SIZE) {
-            // if (xbox->class->intin_urb.actual_length == XBOX_REPORT_SIZE) {
+            if (xbox->nbytes == XBOX_REPORT_SIZE || 
+                xbox->nbytes == XBOX_REPORT_SIZE * 2) {     // 8bit wireless adapter sends 40-byte reports
                 xbox_parse(xbox);
 
                 if (xbox->js_index < 2) {
@@ -334,7 +350,9 @@ free_str:
                             (state_extra & 0x01) << 10 | (state_extra & 0x02) << 10 | (state_extra & 0x10) >> 2 | (state_extra & 0x20) >> 2;
                     xSemaphoreGive(state_mutex);
                 }
-            }
+            } else 
+                DEBUG("XBOX client #%d: nbytes < 0\n", xbox->index);
+
             xbox->nbytes = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
