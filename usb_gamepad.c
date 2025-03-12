@@ -110,6 +110,7 @@ void usbh_xbox_callback(void *arg, int nbytes) {
     DEBUG("  subclass %d, ", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceSubClass); \
     DEBUG("  protocol %d\n", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceProtocol);
 
+uint8_t joy_driver_map = 0;
 
 static void usbh_update(struct usb_config *usb) {
     // check for active hid devices
@@ -117,6 +118,11 @@ static void usbh_update(struct usb_config *usb) {
         char *dev_str = "/dev/inputX";
         dev_str[10] = '0' + i;
         usb->hid_info[i].class = (struct usbh_hid *)usbh_find_class_instance(dev_str);
+        if (usb->hid_info[i].class) {
+            joy_driver_map |= (1 << i);
+        } else {
+            joy_driver_map &= ~(1 << i);
+        }
         
         if(usb->hid_info[i].class && usb->hid_info[i].state == STATE_NONE) {
             DEBUG("NEW HID %d\n", i);
@@ -151,6 +157,11 @@ static void usbh_update(struct usb_config *usb) {
         char *dev_str = "/dev/xboxX";
         dev_str[9] = '0' + i;
         usb->xbox_info[i].class = (struct usbh_hid *)usbh_find_class_instance(dev_str);
+        if (usb->xbox_info[i].class) {
+            joy_driver_map |= (1 << (i + 2));
+        } else {
+            joy_driver_map &= ~(1 << (i + 2));
+        }
         
         if(usb->xbox_info[i].class && usb->xbox_info[i].state == STATE_NONE) {
             DEBUG("NEW XBOX %d\n", i);
@@ -314,8 +325,19 @@ free_str:
     }
 }
 
+static const char *state2str(int state) {
+    switch (state) {
+        case STATE_NONE: return "none";
+        case STATE_DETECTED: return "detected";
+        case STATE_RUNNING: return "running";
+        case STATE_FAILED: return "failed";
+    }
+    return "unknown";
+}
+
 static void usbh_hid_thread(void *argument) {
     DEBUG("Starting usb gamepad host task...");
+    uint64_t last_status = 0;
 
     struct usb_config *usb = (struct usb_config *)argument;
 
@@ -365,6 +387,17 @@ static void usbh_hid_thread(void *argument) {
                 xTaskCreate(usbh_xbox_client_thread, (char *)"xbox_client_task", 2048,
                         &usb->xbox_info[i], configMAX_PRIORITIES-3, &usb->xbox_info[i].task_handle );
             }
+        }
+
+        uint64_t now = bflb_mtimer_get_time_ms();
+        if (now - last_status > 5000) {
+            last_status = now;
+            DEBUG("hid1: %s %s, hid2: %s %s, xbox1: %s %s, xbox2: %s %s", 
+                joy_driver_map & 1 ? "on" : "off", state2str(usb->hid_info[0].state),
+                joy_driver_map & 2 ? "on" : "off", state2str(usb->hid_info[1].state),
+                joy_driver_map & 4 ? "on" : "off", state2str(usb->xbox_info[0].state),
+                joy_driver_map & 8 ? "on" : "off", state2str(usb->xbox_info[1].state)
+            );
         }
 
         // wait for 100ms as this thread only deals with device detection and leaving
