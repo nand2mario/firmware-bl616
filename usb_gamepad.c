@@ -5,6 +5,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+ 
+#include "bflb_mtimer.h"
 
 #include "usb_gamepad.h"
 
@@ -72,13 +74,13 @@ uint8_t hid_allocate_joystick(void) {
     uint8_t idx;
     for(idx=0;joystick_map & (1<<idx);idx++);
     joystick_map |= (1<<idx);
-    DEBUG("Allocating joystick %d (map = %02x)", idx, joystick_map);
+    DEBUG("Alloc joystick %d (map=%02x)\n", idx, joystick_map);
     return idx;
 }
 
 void hid_release_joystick(uint8_t idx) {
     joystick_map &= ~(1<<idx);
-    DEBUG("Releasing joystick %d (map = %02x)", idx, joystick_map);
+    DEBUG("Release joystick %d (map=%02x)\n", idx, joystick_map);
 }
 
 uint8_t byteScaleAnalog(int16_t xbox_val)
@@ -127,11 +129,16 @@ static void usbh_update(struct usb_config *usb) {
         if(usb->hid_info[i].class && usb->hid_info[i].state == STATE_NONE) {
             DEBUG("NEW HID %d\n", i);
             print_usb_class_info(usb->hid_info[i].class);
-
-            // parse report descriptor ...
-            DEBUG("report descriptor: %p", usb->hid_info[i].class->report_desc);
+            bool skip = false;
+            uint16_t vendor_id = usb->hid_info[i].class->hport->device_desc.idVendor;
+            uint16_t product_id = usb->hid_info[i].class->hport->device_desc.idProduct;
+            if (vendor_id == 0x2dc8 && product_id == 0x3107) {  // 8bitdo wireless adapter
+                skip = true;
+            }
+            // DEBUG("report descriptor: %p", usb->hid_info[i].class->report_desc);
             
-            if(!parse_report_descriptor(usb->hid_info[i].class->report_desc, 128, &usb->hid_info[i].report, NULL)) {
+            // parse report descriptor ...
+            if(skip || !parse_report_descriptor(usb->hid_info[i].class->report_desc, 128, &usb->hid_info[i].report, NULL)) {
                 usb->hid_info[i].state = STATE_FAILED;   // parsing failed, don't use
                 return;
             }
@@ -294,6 +301,14 @@ static void usbh_xbox_client_thread(void *arg) {
 free_str:
     free(str);
 
+    // setup urb
+    usbh_int_urb_fill(&xbox->class->intin_urb,
+            xbox->class->hport,
+            xbox->class->intin, xbox->buffer,
+            XBOX_REPORT_SIZE,
+            // 50, NULL, NULL);
+            0, usbh_xbox_callback, xbox);
+
     while(1) {
         int ret = usbh_submit_urb(&xbox->class->intin_urb);
         if (ret < 0)
@@ -303,6 +318,7 @@ free_str:
             xSemaphoreTake(xbox->sem, 0xffffffffUL);
             // DEBUG("XBOX client #%d: nbytes %d\n", xbox->index, xbox->nbytes);
             if (xbox->nbytes == XBOX_REPORT_SIZE) {
+            // if (xbox->class->intin_urb.actual_length == XBOX_REPORT_SIZE) {
                 xbox_parse(xbox);
 
                 if (xbox->js_index < 2) {
@@ -376,13 +392,6 @@ static void usbh_hid_thread(void *argument) {
                 // allocate a joystick index
                 usb->xbox_info[i].js_index = hid_allocate_joystick();
                 DEBUG("  -> joystick %d", usb->xbox_info[i].js_index);
-
-                // setup urb
-                usbh_int_urb_fill(&usb->xbox_info[i].class->intin_urb,
-                        usb->xbox_info[i].class->hport,
-                        usb->xbox_info[i].class->intin, usb->xbox_info[i].buffer,
-                        XBOX_REPORT_SIZE,
-                        0, usbh_xbox_callback, &usb->xbox_info[i]);
 
                 xTaskCreate(usbh_xbox_client_thread, (char *)"xbox_client_task", 2048,
                         &usb->xbox_info[i], configMAX_PRIORITIES-3, &usb->xbox_info[i].task_handle );

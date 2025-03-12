@@ -1261,8 +1261,8 @@ static void main_task(void *pvParameters)
                 if (active_core >= 0) redraw = true;    // redraw immediately if core is detected
             }
             // if (core < 0) continue;         // do not draw or process input if core is not ready
-            if (now - last_redraw_time > 5000) 
-                redraw = true;
+            // if (now - last_redraw_time > 5000) 
+            //     redraw = true;
             if (redraw) {
                 active_core = get_core_id();            // allow jtag to change core underneath us
                 overlay(overlay_on());                  // set correct overlay state
