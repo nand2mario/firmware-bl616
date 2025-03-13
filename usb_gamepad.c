@@ -1,19 +1,16 @@
-// USB gamepad
-// Mostly based on FPGA-Companion by Till Harbaum
+// USB gamepad (Xinput and HID)
+// Based on FPGA-Companion by Till Harbaum
 #include "usbh_core.h"
 #include "usb_config.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
- 
-#include "bflb_mtimer.h"
-
+ #include "bflb_mtimer.h"
 #include "usb_gamepad.h"
-
 #include "hidparser.h"
 
-void overlay_status(const char *fmt, ...);
-#define DEBUG(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
+// Uncomment this to enable on-screen debug messages
+// #define DEBUG_ON
 
 #define MAX_REPORT_SIZE   8
 #define XBOX_REPORT_SIZE 20
@@ -69,6 +66,14 @@ USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XB
 // keep a map of joysticks to be able to report
 // them individually
 static uint8_t joystick_map = 0;
+
+void overlay_status(const char *fmt, ...);
+#define INFO(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
+#ifdef DEBUG_ON
+#define DEBUG(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
+#else
+#define DEBUG(fmt, ...) do {} while(0)
+#endif
 
 uint8_t hid_allocate_joystick(void) {
     uint8_t idx;
@@ -126,7 +131,7 @@ static void usbh_update(struct usb_config *usb) {
         }
         
         if(usb->hid_info[i].class && usb->hid_info[i].state == STATE_NONE) {
-            DEBUG("NEW HID %d\n", i);
+            INFO("HID %d connected\n", i);
             print_usb_class_info(usb->hid_info[i].class);
             bool skip = false;
             uint16_t vendor_id = usb->hid_info[i].class->hport->device_desc.idVendor;
@@ -146,7 +151,7 @@ static void usbh_update(struct usb_config *usb) {
         }
         
         else if(!usb->hid_info[i].class && usb->hid_info[i].state != STATE_NONE) {
-            DEBUG("HID %d LOST\n", i);
+            INFO("HID %d disconnected\n", i);
             if (usb->hid_info[i].task_handle) {
                 vTaskDelete( usb->hid_info[i].task_handle );
                 usb->hid_info[i].task_handle = NULL;
@@ -173,13 +178,13 @@ static void usbh_update(struct usb_config *usb) {
         }
         
         if(usb->xbox_info[i].class && usb->xbox_info[i].state == STATE_NONE) {
-            DEBUG("NEW XBOX %d\n", i);
+            INFO("Xinput %d connected\n", i);
             print_usb_class_info(usb->xbox_info[i].class);
             usb->xbox_info[i].state = STATE_DETECTED;
         }
         
         else if(!usb->xbox_info[i].class && usb->xbox_info[i].state != STATE_NONE) {
-            DEBUG("XBOX %d LOST\n", i);
+            INFO("Xinput %d disconnected\n", i);
             if (usb->xbox_info[i].task_handle) {
                 vTaskDelete( usb->xbox_info[i].task_handle );
                 DEBUG("XBOX %d task deleted\n", i);
@@ -248,7 +253,7 @@ static void xbox_parse(struct xbox_info_S *xbox) {
 static void usbh_hid_client_thread(void *arg) {
     struct hid_info_S *hid = (struct hid_info_S *)arg;
 
-    DEBUG("HID client #%d: thread started\n", hid->index);
+    INFO("HID #%d on        \n", hid->index);
 
     while(1) {
         int ret = usbh_submit_urb(&hid->class->intin_urb);
@@ -287,7 +292,7 @@ struct usb_setup_packet xbox_init_packets[5] = {
     {0x80, 0x06, 0x0302, 0x0409, 32},       // get string descriptor
     {0xC1, 0x01, 0x0100, 0x0000, 20},       // control transfer 1 (a lot of pads need this)
     {0xC1, 0x01, 0x0000, 0x0000, 8},        // control transfer 2
-    /* {0xC0, 0x01, 0x0100, 0x0000, 4}*/};  // skipped as 8bitdo wireless adapter hangs
+    /* {0xC0, 0x01, 0x0100, 0x0000, 4}*/};  // skipped as 8bitdo wireless adapter hangs on this
 
 // four data packets to EP2
 uint8_t xbox_ep2_packets[4][3] = {{0x01, 0x03, 0x02}, {0x02, 0x08, 0x03}, 
@@ -297,7 +302,7 @@ static void usbh_xbox_client_thread(void *arg) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
     int ret = 0;
 
-    DEBUG("XBOX client #%d: thread started.\n", xbox->index);
+    INFO("Xinput #%d on        \n", xbox->index);
 
     // Send initialization packets
     for (int i = 0; i < 4; i++) {
@@ -359,6 +364,7 @@ static void usbh_xbox_client_thread(void *arg) {
     }
 }
 
+#ifdef DEBUG_ON
 static const char *state2str(int state) {
     switch (state) {
         case STATE_NONE: return "none";
@@ -368,6 +374,7 @@ static const char *state2str(int state) {
     }
     return "unknown";
 }
+#endif
 
 static void usbh_hid_thread(void *argument) {
     DEBUG("Starting usb gamepad host task...");

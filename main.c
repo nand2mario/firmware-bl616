@@ -25,6 +25,9 @@
 #include "usb_gamepad.h"
 #include "utils.h"
 
+// Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
+// #define UART_CONSOLE
+
 /////////////////////////////////////////////////////////////////////////////////
 // Global state
 
@@ -137,7 +140,10 @@ static void init_gpio_and_uart(void)
     uart1_dev = bflb_device_get_by_name("uart1");
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
+
+#ifdef UART_CONSOLE
     bflb_uart_set_console(uart1_dev);       // for debug
+#endif
 
     // set JTAG pins to high-Z
     // interrupts masked, SWGPIO mode, output off, input off, schmitt ON
@@ -1261,8 +1267,8 @@ static void main_task(void *pvParameters)
                 if (active_core >= 0) redraw = true;    // redraw immediately if core is detected
             }
             // if (core < 0) continue;         // do not draw or process input if core is not ready
-            // if (now - last_redraw_time > 5000) 
-            //     redraw = true;
+            if (now - last_redraw_time > 5000) 
+                redraw = true;
             if (redraw) {
                 active_core = get_core_id();            // allow jtag to change core underneath us
                 overlay(overlay_on());                  // set correct overlay state
