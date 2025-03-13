@@ -119,6 +119,24 @@ void usbh_xbox_callback(void *arg, int nbytes) {
 uint8_t joy_driver_map = 0;
 
 static void usbh_update(struct usb_config *usb) {
+    // check status for tasks
+    for (int i = 0; i < CONFIG_USBHOST_MAX_HID_CLASS; i++) {
+        if (usb->hid_info[i].state != STATE_RUNNING) continue;
+        if (usb->hid_info[i].task_handle == NULL || 
+            eTaskGetState(usb->hid_info[i].task_handle) == eDeleted) {
+            INFO("HID client #%d: task died unexpectedly\n", i);
+            usb->hid_info[i].state = STATE_NONE;
+        }
+    }
+    for (int i = 0; i < CONFIG_USBHOST_MAX_XBOX_CLASS; i++) {
+        if (usb->xbox_info[i].state != STATE_RUNNING) continue;
+        if (usb->xbox_info[i].task_handle == NULL || 
+            eTaskGetState(usb->xbox_info[i].task_handle) == eDeleted) {
+            INFO("XBOX client #%d: task died unexpectedly\n", i);   
+            usb->xbox_info[i].state = STATE_NONE;
+        }
+    }
+
     // check for active hid devices
     for(int i=0;i<CONFIG_USBHOST_MAX_HID_CLASS;i++) {
         char *dev_str = "/dev/inputX";
@@ -298,6 +316,21 @@ struct usb_setup_packet xbox_init_packets[5] = {
 uint8_t xbox_ep2_packets[4][3] = {{0x01, 0x03, 0x02}, {0x02, 0x08, 0x03}, 
                                   {0x01, 0x03, 0x02}, {0x01, 0x03, 0x06}};
 
+static void xbox_init(struct xbox_info_S *xbox) {
+    for (int i = 0; i < 4; i++) {
+        usbh_bulk_urb_fill(&xbox->class->intout_urb,
+            xbox->class->hport,
+            xbox->class->intout,
+            xbox_ep2_packets[i], 3,
+            0, usbh_xbox_callback, xbox);
+        int ret = usbh_submit_urb(&xbox->class->intout_urb);
+        if (ret < 0)
+            DEBUG("XBOX FATAL: submit EP2 failed %d", ret);
+        else
+            xSemaphoreTake(xbox->sem, 0xffffffffUL);    // wait for callback to finish
+    }
+}
+
 static void usbh_xbox_client_thread(void *arg) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
     int ret = 0;
@@ -310,31 +343,21 @@ static void usbh_xbox_client_thread(void *arg) {
             DEBUG("XBOX: init packet %d failed: %d", i, ret);
         }
     }
-    for (int i = 0; i < 4; i++) {
-        usbh_bulk_urb_fill(&xbox->class->intout_urb,
-            xbox->class->hport,
-            xbox->class->intout,
-            xbox_ep2_packets[i], 3,
-            0, usbh_xbox_callback, xbox);
-        ret = usbh_submit_urb(&xbox->class->intout_urb);
-        if (ret < 0)
-            DEBUG("XBOX FATAL: submit EP2 failed %d", ret);
-        xSemaphoreTake(xbox->sem, 0xffffffffUL);    // wait for callback to finish
-    }
+    xbox_init(xbox);
     DEBUG("XBOX client #%d: all init packets sent, entering main loop.\n", xbox->index);
 
     // setup urb
     usbh_int_urb_fill(&xbox->class->intin_urb, xbox->class->hport, 
             xbox->class->intin, xbox->buffer, XBOX_REPORT_SIZE,
-            0, usbh_xbox_callback, xbox);
+            50, usbh_xbox_callback, xbox);
 
     int total = 0, error = 0;
     while(1) {
         int ret = usbh_submit_urb(&xbox->class->intin_urb);
         total++;
         if (ret < 0) {
-            DEBUG("XBOX client #%d: submit failed %d\n", xbox->index, ret);
             error++;
+            INFO("XBOX client #%d: submit failed %d\n", xbox->index, ret);
         } else {
             xSemaphoreTake(xbox->sem, 0xffffffffUL);    // Wait for result
             if (xbox->nbytes == XBOX_REPORT_SIZE) {     // 8bit wireless adapter sends 40-byte reports
@@ -353,8 +376,15 @@ static void usbh_xbox_client_thread(void *arg) {
                             (state_extra & 0x01) << 10 | (state_extra & 0x02) << 10 | (state_extra & 0x10) >> 2 | (state_extra & 0x20) >> 2;
                     xSemaphoreGive(state_mutex);
                 }
-            } else 
-               error++;
+            } else {
+                error++;
+                if (xbox->nbytes == -USB_ERR_TIMEOUT) {
+                    INFO("XBOX client #%d: timeout, reinit\n", xbox->index);
+                    usbh_kill_urb(&xbox->class->intin_urb);
+                    // reinit if we timeout (device could've gone asleep)
+                    xbox_init(xbox);
+                }
+            }
             xbox->nbytes = 0;
         }
         if (total % 1000 == 0) {

@@ -26,7 +26,7 @@
 #include "utils.h"
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
-// #define UART_CONSOLE
+#define UART_CONSOLE
 
 /////////////////////////////////////////////////////////////////////////////////
 // Global state
@@ -169,6 +169,12 @@ void disable_jtag_pins(void) {
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDO);
 }
 
+#ifndef UART_CONSOLE
+// disable printf
+int __attribute__((weak)) putchar(int ch) {
+    return ch;
+}
+#endif
 
 /////////////////////////////////////////////////////////////////////////////////
 // Overlay and other core control over UART
@@ -181,9 +187,11 @@ int overlay_on() {
 
 void overlay_cursor(int col, int row) {
     // uart1 command: 4 x[7:0] y[7:0]
+    taskENTER_CRITICAL();
     bflb_uart_putchar(uart1_dev, 0x04);       // command 4, move cursor
     bflb_uart_putchar(uart1_dev, col);
     bflb_uart_putchar(uart1_dev, row);
+    taskEXIT_CRITICAL();
 }
 
 void overlay_printf(const char *fmt, ...) {
@@ -192,12 +200,14 @@ void overlay_printf(const char *fmt, ...) {
     char buf[256];
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    
+
+    taskENTER_CRITICAL();
     bflb_uart_putchar(uart1_dev, 0x05);       // command 5, display string
     for(int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) {
         bflb_uart_putchar(uart1_dev, buf[i]);
     }
     bflb_uart_putchar(uart1_dev, '\0');
+    taskEXIT_CRITICAL();
 }
 
 void overlay_clear() {
@@ -324,22 +334,28 @@ int16_t get_core_id(void) {
 
 // set loading state
 void set_loading_state(int state) {
+    taskENTER_CRITICAL();
     bflb_uart_putchar(uart1_dev, 6);        // 6 loadingstate[7:0]
     bflb_uart_putchar(uart1_dev, state);        
+    taskEXIT_CRITICAL();
 }
 
 // turn overlay on/off
 void overlay(int state) {
+    taskENTER_CRITICAL();
     _overlay_on = state;
     bflb_uart_putchar(uart1_dev, 8);        // 8 x[7:0]
     bflb_uart_putchar(uart1_dev, state);        
+    taskEXIT_CRITICAL();
 }
 
 // bring FPGA to a good state by sending a few 0's
 void send_blank_packet(void) {
+    taskENTER_CRITICAL();
     for (int i = 0; i < 8; i++) {
         bflb_uart_putchar(uart1_dev, 0);
     }
+    taskEXIT_CRITICAL();
 }
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -546,6 +562,7 @@ int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) 
 
 // Send a romdata packet to core of len bytes in `fbuf`
 void send_fbuf_data(int len) {
+    taskENTER_CRITICAL();
     bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
     bflb_uart_putchar(uart1_dev, (len >> 16) & 0xff);  // MSB first
     bflb_uart_putchar(uart1_dev, (len >> 8) & 0xff);
@@ -553,6 +570,7 @@ void send_fbuf_data(int len) {
     for (int i = 0; i < len; i ++) {
         bflb_uart_putchar(uart1_dev, fbuf[i]);
     }
+    taskEXIT_CRITICAL();
 }
 
 // Load a NES ROM
@@ -588,16 +606,17 @@ int loadnes(const char *fname) {
 
 
     do {
-        if ((r = f_read(&fcore, fbuf, BLOCK_SIZE, &br)) != FR_OK)
+        if ((r = f_read(&fcore, fbuf, 1024 /*BLOCK_SIZE*/, &br)) != FR_OK)
             break;
         // start rom loading command
         send_fbuf_data(br);
+        taskYIELD();                // allow gamepad polling to run
         total += br;
         if ((total & 0xfff) == 0) {	// display progress every 4KB
             //              01234567890123456789012345678901
             overlay_status("%d/%dK                          ", total >> 10, size >> 10);
         }
-    } while (br == BLOCK_SIZE);
+    } while (br == 1024 /*BLOCK_SIZE*/);
 
     DEBUG("loadnes: %d bytes\n", total);
     overlay_status("Success");
