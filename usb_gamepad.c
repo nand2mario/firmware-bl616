@@ -64,7 +64,7 @@ static struct usb_config {
  
 TaskHandle_t usb_handle;
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t hid_buffer[CONFIG_USBHOST_MAX_HID_CLASS][MAX_REPORT_SIZE];
-USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE*2];
+USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XBOX_CLASS][XBOX_REPORT_SIZE];
 
 // keep a map of joysticks to be able to report
 // them individually
@@ -283,15 +283,15 @@ static void usbh_hid_client_thread(void *arg) {
 
 // from fixcontroler.py: https://gist.github.com/adnanh/f60f069fc9185a48b73db9987b9e9108
 struct usb_setup_packet xbox_init_packets[5] = {
-    {0x80, 0x06, 0x0302, 0x0409, 2},        // get string descriptor
+    {0x80, 0x06, 0x0302, 0x0409, 2},        // get string descriptor (SN30pro needs this)
     {0x80, 0x06, 0x0302, 0x0409, 32},       // get string descriptor
-    {0xC1, 0x01, 0x0100, 0x0000, 20},       // control transfer 1
+    {0xC1, 0x01, 0x0100, 0x0000, 20},       // control transfer 1 (a lot of pads need this)
     {0xC1, 0x01, 0x0000, 0x0000, 8},        // control transfer 2
-    {0xC0, 0x01, 0x0100, 0x0000, 4}};       // control transfer 3
+    /* {0xC0, 0x01, 0x0100, 0x0000, 4}*/};  // skipped as 8bitdo wireless adapter hangs
 
 // four data packets to EP2
 uint8_t xbox_ep2_packets[4][3] = {{0x01, 0x03, 0x02}, {0x02, 0x08, 0x03}, 
-                                         {0x01, 0x03, 0x02}, {0x01, 0x03, 0x06}};
+                                  {0x01, 0x03, 0x02}, {0x01, 0x03, 0x06}};
 
 static void usbh_xbox_client_thread(void *arg) {
     struct xbox_info_S *xbox = (struct xbox_info_S *)arg;
@@ -299,8 +299,8 @@ static void usbh_xbox_client_thread(void *arg) {
 
     DEBUG("XBOX client #%d: thread started.\n", xbox->index);
 
-    // 8bitdo SN30pro requires getting the string descriptor for initialization
-    for (int i = 0; i < 4; i++) {       // XXX: last packet causes 8bit wireless adapter to hang
+    // Send initialization packets
+    for (int i = 0; i < 4; i++) {
         if ((ret = usbh_control_transfer(xbox->class->hport, &xbox_init_packets[i], xbox->buffer)) < 0) {
             DEBUG("XBOX: init packet %d failed: %d", i, ret);
         }
@@ -319,22 +319,20 @@ static void usbh_xbox_client_thread(void *arg) {
     DEBUG("XBOX client #%d: all init packets sent, entering main loop.\n", xbox->index);
 
     // setup urb
-    usbh_int_urb_fill(&xbox->class->intin_urb,
-            xbox->class->hport,
-            xbox->class->intin, xbox->buffer,
-            XBOX_REPORT_SIZE*2,
-            // 50, NULL, NULL);
+    usbh_int_urb_fill(&xbox->class->intin_urb, xbox->class->hport, 
+            xbox->class->intin, xbox->buffer, XBOX_REPORT_SIZE,
             0, usbh_xbox_callback, xbox);
 
+    int total = 0, error = 0;
     while(1) {
         int ret = usbh_submit_urb(&xbox->class->intin_urb);
-        if (ret < 0)
+        total++;
+        if (ret < 0) {
             DEBUG("XBOX client #%d: submit failed %d\n", xbox->index, ret);
-        else {
-            // Wait for result
-            xSemaphoreTake(xbox->sem, 0xffffffffUL);
-            if (xbox->nbytes == XBOX_REPORT_SIZE || 
-                xbox->nbytes == XBOX_REPORT_SIZE * 2) {     // 8bit wireless adapter sends 40-byte reports
+            error++;
+        } else {
+            xSemaphoreTake(xbox->sem, 0xffffffffUL);    // Wait for result
+            if (xbox->nbytes == XBOX_REPORT_SIZE) {     // 8bit wireless adapter sends 40-byte reports
                 xbox_parse(xbox);
 
                 if (xbox->js_index < 2) {
@@ -351,11 +349,13 @@ static void usbh_xbox_client_thread(void *arg) {
                     xSemaphoreGive(state_mutex);
                 }
             } else 
-                DEBUG("XBOX client #%d: nbytes < 0\n", xbox->index);
-
+               error++;
             xbox->nbytes = 0;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        if (total % 1000 == 0) {
+            DEBUG("XBOX client #%d: total %d, error %d\n", xbox->index, total, error);
+        }
+        vTaskDelay(pdMS_TO_TICKS(4));
     }
 }
 
