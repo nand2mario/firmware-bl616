@@ -104,6 +104,17 @@ def handle_fpga_command():
     elif command == b'\x11':  # Response core id
         st = ser.read(1)
         print(f"<core_id={st}>")
+    elif command == b'\x22':  # Response config string (null-terminated)
+        string = b''
+        while True:
+            char = ser.read(1)
+            if char == b'\x00':
+                break
+            string += char
+        print(f"<config_string:{string.decode('utf-8')}>")
+    elif command == b'\x33':  # Response crc16
+        st = ser.read(2)
+        print(f"<crc16:{st.hex()}>")
     else:
         print(f"Unknown response: {command}")
 
