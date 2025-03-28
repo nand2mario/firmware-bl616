@@ -4,18 +4,35 @@ import serial
 import time
 import sys
 
-if len(sys.argv) == 2:
-    mode = '-b'  # default mode
-    port = sys.argv[1]
-elif len(sys.argv) == 3:
-    mode = sys.argv[1]
-    port = sys.argv[2]
-else:
+
+def usage():
     print("liveuart.py - utility to view UART traffic by BL616 and FPGA with Sipeed RV-Debugger.")
-    print("Usage: liveuart.py [-b|-f] <com_port>")
+    print("Usage: liveuart.py [-b|-f] <com_port> [<rom_file>]")
     print("  -b: decode messages from BL616 (default)")
     print("  -f: decode messages from FPGA ")
+    print("  <rom_file>: optional file to load into the core")
     sys.exit(1)
+
+# Parse command line arguments
+args = sys.argv[1:]
+
+if len(args) == 0:
+    usage()
+
+# Check if first arg is mode flag
+if args[0] in ['-b', '-f']:
+    mode = args[0]
+    args = args[1:]  # Remove mode from args
+else:
+    mode = '-b'  # Default mode
+
+# Need at least port after optional mode
+if len(args) == 0:
+    usage()
+
+port = args[0]
+rom = args[1] if len(args) > 1 else None
+
 
 if mode not in ['-b', '-f']:
     print("Error: Mode must be either -b (BL616) or -f (FPGA)")
@@ -118,7 +135,25 @@ def handle_fpga_command():
     else:
         print(f"Unknown response: {command}")
 
+def download_rom():
+    ser.write(b'\x06\x01')   # Start loading ROM
+    CHUNK_SIZE = 8 * 1024  # 8KB chunks
+    with open(rom, 'rb') as f:
+        while True:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            # Send command 0x07 followed by 3-byte length (MSB first)
+            length = len(chunk)
+            ser.write(b'\x07' + bytes([(length >> 16) & 0xFF, (length >> 8) & 0xFF, length & 0xFF]))
+            # Send the chunk data
+            ser.write(chunk)
+    ser.write(b'\x06\x00')  # Signal loading complete
+
 while True:
+    if rom:
+        download_rom()
+
     if mode == '-b':
         handle_bl616_command()
     else:
