@@ -149,11 +149,14 @@ def download_rom():
             # Send the chunk data
             ser.write(chunk)
     ser.write(b'\x06\x00')  # Signal loading complete
+    ser.write(b'\x08\x00')  # Set overlay state to 0
+
+if rom:
+    download_rom()
+    print("ROM loaded")
+    sys.exit(0)
 
 while True:
-    if rom:
-        download_rom()
-
     if mode == '-b':
         handle_bl616_command()
     else:
