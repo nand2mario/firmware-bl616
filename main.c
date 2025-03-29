@@ -582,7 +582,7 @@ int loadnes(const char *fname) {
     // check extension .nes
     char *p = strcasestr(fname, ".nes");
     if (p == NULL) {
-        overlay_status("Only .nes supported");
+        overlay_message("Only .nes supported", 1);
         goto loadnes_end;
     }
 
@@ -692,7 +692,7 @@ int loadsnes(const char *fname) {
     if (p == NULL)
         p = strcasestr(fname, ".smc");
     if (p == NULL) {
-        overlay_status("Only .smc or .sfc supported");
+        overlay_message("Only .smc or .sfc supported", 1);
         goto loadsnes_end;
     }
 
@@ -806,7 +806,7 @@ int loadgba(const char *fname) {
     // check extension .gba
     char *p = strcasestr(fname, ".gba");
     if (p == NULL) {
-        overlay_status("Only .gba supported");
+        overlay_message("Only .gba supported", 1);
         goto loadgba_end;
     }
 
@@ -866,8 +866,10 @@ int loadmd(const char *fname) {
 
     // check extension .bin
     char *p = strcasestr(fname, ".bin");
+    if (p == NULL)
+        p = strcasestr(fname, ".md");
     if (p == NULL) {
-        overlay_status("Only .bin supported");
+        overlay_message("Only .bin or .md supported", 1);
         goto loadmd_end;
     }
 
@@ -900,6 +902,58 @@ int loadmd(const char *fname) {
     } while (br == 1024);
 
     DEBUG("loadmd: %d bytes\n", total);
+    overlay_status("Success");
+    core_running = true;
+
+    overlay(0);		// turn off OSD
+
+loadmd_close_file:
+    set_loading_state(0);   // turn off game loading, this starts the core
+    f_close(&fcore);
+loadmd_end:
+    return r;
+}
+
+int loadsms(const char *fname) {
+    DEBUG("loadsms start\n");
+    FRESULT r = -1;
+
+    // check extension .bin
+    char *p = strcasestr(fname, ".sms");
+    if (p == NULL) {
+        overlay_message("Only .sms, .gg, and .sg supported", 1);
+        goto loadmd_end;
+    }
+
+    r = f_open(&fcore, fname, FA_READ);
+    if (r) {
+        overlay_status("Cannot open file");
+        goto loadmd_end;
+    }
+    unsigned int off = 0, br, total = 0;
+    unsigned int size = get_file_size(fname);
+
+    // load actual ROM
+    set_loading_state(1);		// enable game loading, this resets the core
+    core_running = false;
+
+    // Send rom content to core
+    if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        overlay_status("Seek failure");
+        goto loadmd_close_file;
+    }
+    do {
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
+            break;
+        send_fbuf_data(br);
+        total += br;
+        if ((total & 0xfff) == 0) {	// display progress every 4KB
+            //              01234567890123456789012345678901
+            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
+        }
+    } while (br == 1024);
+
+    DEBUG("loadsms: %d bytes\n", total);
     overlay_status("Success");
     core_running = true;
 
@@ -1152,6 +1206,7 @@ struct core_info core_info_list[] = {
     {2, "SNES", "usb:snes", "snestang.bin", loadsnes},
     {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
     {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
+    {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
     {0, NULL, NULL, NULL, NULL}
 };
 
@@ -1160,7 +1215,7 @@ struct core_info core_info_list[] = {
 int16_t main_menu_config[] = 
    {1,2,
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
-    3,4,
+    3,4,5,
 #endif
     -1, -2, 0};
 
