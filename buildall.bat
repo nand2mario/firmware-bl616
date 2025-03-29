@@ -6,7 +6,7 @@ if not exist buildall mkdir buildall
 del /Q buildall\*
 
 REM List of boards to build
-set "boards=console60k mega60k mega138k primer25k"
+set "boards=console60k console138k mega60k mega138k primer25k"
 
 for %%b in (%boards%) do (
     echo Building for board: %%b
@@ -25,6 +25,8 @@ for %%b in (%boards%) do (
         copy /Y build\build_out\tangcore_bl616.bin buildall\tangcore_%%b.bin
         if "%%b"=="console60k" (
             copy /Y bl616_fpga_partner_60kConsole.bin buildall\bl616_fpga_partner_%%b.bin
+        ) else if "%%b"=="console138k" (
+            copy /Y bl616_fpga_partner_138kConsole.bin buildall\bl616_fpga_partner_%%b.bin
         ) else if "%%b"=="mega60k" (
             copy /Y bl616_fpga_partner_138k60kNeoDock.bin buildall\bl616_fpga_partner_%%b.bin
         ) else if "%%b"=="mega138k" (
