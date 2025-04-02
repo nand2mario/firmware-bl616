@@ -932,6 +932,7 @@ int loadsms(const char *fname) {
     }
     unsigned int off = 0, br, total = 0;
     unsigned int size = get_file_size(fname);
+    off = size % 1024;          // skipping 512-byte header if there is one
 
     // load actual ROM
     set_loading_state(1);		// enable game loading, this resets the core
