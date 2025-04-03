@@ -788,6 +788,20 @@ bool eraseSRAM() {
 	overlay_cursor(2, 0);
 	overlay_printf("ID=%08x, status=%08x", id, status);
 
+	bool auto_boot_2nd_fail = (status & (1 << 4)) == (1 << 4);
+	bool is_timeout = (status & (1 << 3)) == (1 << 3);
+	bool bad_cmd = (status & STATUS_BAD_COMMAND) == STATUS_BAD_COMMAND;
+	if (is_timeout || auto_boot_2nd_fail || bad_cmd) {
+		overlay_status("Erase: send 0x3F\n");
+		send_command(CONFIG_ENABLE);
+		send_command(0x3F);
+		send_command(CONFIG_DISABLE);
+		send_command(NOOP);
+		send_command(READ_IDCODE);
+		send_command(NOOP);
+		jtag_toggleClk(125 * 8);
+	}
+
 	if (!enableCfg()) {
 		overlay_status("FAIL to enable configuration\r\n");
 		return false;

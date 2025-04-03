@@ -415,11 +415,11 @@ bool load_core(const char *fname) {
         goto load_core_close;
     }
 
-    overlay_status("Erasing again...");
-    if (!eraseSRAM()) {
-        overlay_printf("Failed to erase SRAM 2nd time\n");
-        goto load_core_close;
-    }    
+    // overlay_status("Erasing again...");
+    // if (!eraseSRAM()) {
+    //     overlay_printf("Failed to erase SRAM 2nd time\n");
+    //     goto load_core_close;
+    // }    
 
     if (!writeSRAM_start()) {
         overlay_printf("Failed to start write SRAM\n");
