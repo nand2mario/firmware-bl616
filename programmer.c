@@ -891,7 +891,7 @@ bool writeSRAM_end() {
 
 	uint32_t usercode = readUserCode();
 	uint32_t status_reg = readStatusReg();
-    overlay_status("Usercode=0x%04x, status=0x%04x\r\n", usercode, status_reg);
+    overlay_status("Usercode=0x%08x, status=0x%08x\r\n", usercode, status_reg);
 
 	if (status_reg & STATUS_DONE_FINAL) {
 		// printf("DONE\r\n");

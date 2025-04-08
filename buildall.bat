@@ -26,7 +26,7 @@ for %%b in (%boards%) do (
         if "%%b"=="console60k" (
             copy /Y bl616_fpga_partner_60kConsole.bin buildall\bl616_fpga_partner_%%b.bin
         ) else if "%%b"=="console138k" (
-            copy /Y bl616_fpga_partner_138kConsole.bin buildall\bl616_fpga_partner_%%b.bin
+            copy /Y bl616_fpga_partner_60kConsole.bin buildall\bl616_fpga_partner_%%b.bin
         ) else if "%%b"=="mega60k" (
             copy /Y bl616_fpga_partner_138k60kNeoDock.bin buildall\bl616_fpga_partner_%%b.bin
         ) else if "%%b"=="mega138k" (
