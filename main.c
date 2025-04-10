@@ -26,7 +26,7 @@
 #include "utils.h"
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
-#define UART_CONSOLE
+// #define UART_CONSOLE
 
 /////////////////////////////////////////////////////////////////////////////////
 // Global state
@@ -141,9 +141,7 @@ static void init_gpio_and_uart(void)
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
 
-#ifdef UART_CONSOLE
     bflb_uart_set_console(uart1_dev);       // for debug
-#endif
 
     // set JTAG pins to high-Z
     // interrupts masked, SWGPIO mode, output off, input off, schmitt ON
