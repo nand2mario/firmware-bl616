@@ -1,10 +1,15 @@
 #pragma once
 
+#include <strings.h>
 #include "bflb_gpio.h"
+#include "bflb_uart.h"
 
 #include <FreeRTOS.h>
 #include "task.h"
 #include "semphr.h"
+
+// #include "usbh_core.h"
+#include "ff.h"
 
 #define DEBUG(...) overlay_printf(__VA_ARGS__)
 // #define DEBUG(...) do {} while(0)
@@ -121,3 +126,21 @@ extern int16_t main_menu_config[];
 #define OPTION_OSD_KEY_SELECT_RIGHT 2
 
 #define OSD_KEY_CODE (option_osd_key == OPTION_OSD_KEY_SELECT_START ? 0xC : 0x84)
+
+extern int loadpc(const char *fname);
+extern void set_loading_state(int state);
+extern void send_fbuf_data(int len);
+extern void overlay_message(char *msg, int center);
+
+#ifndef USB_NOCACHE_RAM_SECTION
+#define USB_NOCACHE_RAM_SECTION __attribute__((section(".noncacheable")))
+#endif
+
+extern bool core_running;
+extern USB_NOCACHE_RAM_SECTION FIL fcore;
+extern USB_NOCACHE_RAM_SECTION FIL ffloppy;
+#define BLOCK_SIZE (8*1024)
+extern USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
+extern bool floppy_mounted;
+
+extern struct bflb_device_s *uart1_dev;

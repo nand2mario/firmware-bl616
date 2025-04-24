@@ -359,11 +359,10 @@ void send_blank_packet(void) {
 /////////////////////////////////////////////////////////////////////////////////
 // Core loading and other file system operations
 
-// nand2mario: these USB data structures cannot be UNCACHED as they are written to by hardware
+// nand2mario: these USB data structures cannot be CACHED as they are written to by hardware
 USB_NOCACHE_RAM_SECTION FATFS fs;
 USB_NOCACHE_RAM_SECTION FIL fcore;
-#define BLOCK_SIZE (8*1024)
-static USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
+USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
 FRESULT res_sd = 0;
 #define PAGESIZE 22
@@ -1207,6 +1206,7 @@ struct core_info core_info_list[] = {
     {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
     {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
     {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
+    {6, "IBM PC/XT", "usb:pc", "pctang.bin", loadpc},
     {0, NULL, NULL, NULL, NULL}
 };
 
@@ -1215,7 +1215,7 @@ struct core_info core_info_list[] = {
 int16_t main_menu_config[] = 
    {1,2,
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
-    3,4,5,
+    3,4,5,6,
 #endif
     -1, -2, 0};
 
@@ -1261,7 +1261,7 @@ static void uart1_rx_task(void *pvParameters)
         if (bflb_uart_rxavailable(uart1_dev)) {
             uint8_t ch = bflb_uart_getchar(uart1_dev);
             
-            if ((ch == 0x01 || ch == 0x11) && pos == 0) {        // Start of new packet
+            if ((ch == 0x01 || ch == 0x11 || ch == 0x02 || ch == 0x03) && pos == 0) {        // Start of new packet
                 pos = 1;
                 type = ch;
             } else if (type == 0x1 && pos > 0 && pos < 5) {      // periodic joypad state
@@ -1289,6 +1289,45 @@ static void uart1_rx_task(void *pvParameters)
                     xSemaphoreGive(state_mutex);
                 }
                 pos = 0;
+            } else if (type == 0x03 && pos > 0) {            // floppy read
+                buffer[pos-1] = ch;
+                pos++;
+                if (pos == 2) {
+                    uint16_t drive = buffer[0] >> 7;
+                    uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
+                    if (floppy_mounted) {
+                        UINT br;
+                        f_lseek(&ffloppy, sector * 512);
+                        if (f_read(&ffloppy, fbuf, 512, &br) == FR_OK) {
+                            bflb_uart_putchar(uart1_dev, 0x0b);
+                            for (int i = 0; i < br; i++) {
+                                bflb_uart_putchar(uart1_dev, fbuf[i]);
+                            }
+                        } else {
+                            overlay_status("Failed to read floppy");
+                        }
+                    }
+                    pos = 0;   // reset for next packet
+                }
+            } else if (type == 0x02 && pos > 0) {            // floppy write
+                if (pos <= 2) 
+                    buffer[pos-1] = ch;
+                else
+                    fbuf[pos-3] = ch;
+                pos++;
+            
+                if (pos == 512+2) {
+                    uint16_t drive = buffer[0] >> 7;
+                    uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
+                    if (floppy_mounted) {
+                        UINT br;
+                        f_lseek(&ffloppy, sector * 512);
+                        if (f_write(&ffloppy, fbuf, 512, &br) != FR_OK) {
+                            overlay_status("Failed to write floppy");
+                        }
+                    }
+                    pos = 0;   // reset for next packet
+                }
             } else {
                 pos = 0; // Reset if we get out of sync
             }
