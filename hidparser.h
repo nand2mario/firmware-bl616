@@ -57,6 +57,12 @@ bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t
 
 // HID report processing 
 
+struct hid_kbd_state_S {
+  unsigned char last_report[8];	
+};
+
+struct hid_mouse_state_S {
+};
 struct hid_joystick_state_S {
   unsigned char last_state;
   unsigned char js_index;
@@ -66,15 +72,17 @@ struct hid_joystick_state_S {
 };
 
 typedef union {
-//   struct hid_kbd_state_S kbd;
-//   struct hid_mouse_state_S mouse;
+  struct hid_kbd_state_S kbd;
+  struct hid_mouse_state_S mouse;
   struct hid_joystick_state_S joystick;  
 } hid_state_t;
 
 // Parse received report `data` into `state`, given report descriptor `report`
 void hid_parse(const hid_report_t *report, hid_state_t *state, uint8_t const* data, uint16_t len);
 
-// Parse joystick report `buffer` into `state`
+// Parse report `buffer` into `state`
+void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state, const unsigned char *buffer, int nbytes);
+void mouse_parse(const hid_report_t *report, struct hid_mouse_state_S *state, const unsigned char *buffer, int nbytes);
 void joystick_parse(const hid_report_t *report, struct hid_joystick_state_S *state, const unsigned char *buffer, int nbytes);
 
 #endif // HIDPARSER_H

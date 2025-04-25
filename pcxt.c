@@ -6,7 +6,7 @@
 bool floppy_mounted = false;
 USB_NOCACHE_RAM_SECTION FIL ffloppy;
 
-static IOWR(uint16_t addr, uint16_t data) {
+static void IOWR(uint16_t addr, uint16_t data) {
     taskENTER_CRITICAL();
     bflb_uart_putchar(uart1_dev, 0x0a);
     bflb_uart_putchar(uart1_dev, addr >> 8);

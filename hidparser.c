@@ -9,9 +9,11 @@
 #include <string.h>
 
 #include "hidparser.h"
+#include "usb2ps2.h"
+#include "utils.h"
 
 #define hidp_debugf(fmt, ...) do {} while(0)
-#define DEBUG(fmt, ...) printf(fmt, ##__VA_ARGS__)
+// #define DEBUG(fmt, ...) printf(fmt, ##__VA_ARGS__)
 
 #if 0
 #define hidp_extreme_debugf(...) hidp_debugf(__VA_ARGS__)
@@ -487,6 +489,48 @@ bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t
 	return false;
 }
 
+void kbd_tx(const ps2_scancode_t scancode) {
+	bflb_uart_putchar(uart1_dev, 0x0C);
+	for (int i = 0; i < scancode.len; i++) {
+		bflb_uart_putchar(uart1_dev, scancode.code[i]);
+	}
+}
+
+// 8 bytes keyboard report: [0]: modifiers, [2-7]: keys pressed
+// we convert to ps2 keyboard report and send to the core
+// F12 toggles the OSD state. In OSD, arrow keys and space/enter are used for navigation.
+void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
+	       const unsigned char *buffer, int nbytes) {
+	// we expect boot mode packets which are exactly 8 bytes long
+	if(nbytes != 8) return;
+  
+	// check if modifier have changed
+	for(int i=0;i<8;i++) {            // scancodes are 0xE0 ~ 0xE7
+		uint8_t mask = 1 << i;
+		if ((buffer[0] & mask) != (state->last_report[0] & mask)) {
+			bool is_break = (buffer[0] & mask) != 0;
+			kbd_tx(usb_to_ps2(0xE0 + i, is_break));
+		}
+	}
+  
+	// send scancodes
+	for (int i = 0; i < 6; i++) {
+		if (buffer[2+i] != state->last_report[2+i]) {
+			// key released?
+			if (state->last_report[2+i]) {
+				kbd_tx(usb_to_ps2(state->last_report[2+i], true));
+			}
+			// key pressed?
+			if (buffer[2+i]) {
+				kbd_tx(usb_to_ps2(buffer[2+i], false));
+			}
+		}
+	}
+
+	// save current report
+	memcpy(state->last_report, buffer, 8);
+}
+
 // collect bits from byte stream and assemble them into a signed word
 static uint16_t collect_bits(const uint8_t *p, uint16_t offset, uint8_t size, bool is_signed) {
   // mask unused bits of first byte
@@ -601,7 +645,7 @@ void hid_parse(const hid_report_t *report, hid_state_t *state, uint8_t const* da
   
   if(len == report->report_size) {
     if(report->type == REPORT_TYPE_KEYBOARD)
-      DEBUG("KEYBOARD");
+      kbd_parse(report, &state->kbd, data, len);
     
     if(report->type == REPORT_TYPE_MOUSE)
       DEBUG("MOUSE");
