@@ -490,10 +490,12 @@ bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t
 }
 
 void kbd_tx(const ps2_scancode_t scancode) {
-	fpga_tx_header(0x0b, scancode.len+1);
+	taskENTER_CRITICAL();
+	fpga_tx_header(0x0c, scancode.len+1);
 	for (int i = 0; i < scancode.len; i++) {
 		fpga_tx_byte(scancode.code[i]);
 	}
+	taskEXIT_CRITICAL();
 }
 
 // 8 bytes keyboard report: [0]: modifiers, [2-7]: keys pressed
@@ -522,6 +524,15 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	// send scancodes
 	for (int i = 0; i < 6; i++) {
 		if (buffer[2+i] != state->last_report[2+i]) {
+			// F12 to toggle OSD
+			if (buffer[2+i] == 0x45) {
+				overlay(!overlay_on());		// toggle OSD
+				continue;
+			} else if (state->last_report[2+i] == 0x45) {
+				// consume F12 key released event
+				continue;
+			}
+
 			// key released?
 			if (state->last_report[2+i]) {
 				ps2_scancode_t r = usb_to_ps2(state->last_report[2+i], true);

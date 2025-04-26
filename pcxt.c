@@ -32,6 +32,7 @@ int loadpc(const char *fname) {
         UINT br;
 
         // load BIOS
+        DEBUG("load BIOS\n");
         if (f_stat(BIOS, &fno) != FR_OK) {
             overlay_message( "Cannot find /pc/bios.bin", 1);
             return -1;
@@ -47,6 +48,7 @@ int loadpc(const char *fname) {
             send_fbuf_data(br);
         } while (br == 1024);        
         f_close(&fcore);
+        DEBUG("load BIOS done\n");
     }
 
     // mount floppy image
@@ -85,6 +87,7 @@ int loadpc(const char *fname) {
         overlay_message( "Unsupported floppy image size", 1);
         return -1;
     }
+    DEBUG("set floppy parameters\n");
     IOWR(0xf200, 1);    // media present
     IOWR(0xf201, 0);    // write protect
     IOWR(0xf202, cylinders);
@@ -98,6 +101,8 @@ int loadpc(const char *fname) {
         set_loading_state(0);
         core_running = true;
     }
+
+    overlay(0);
 
     return 0;
 }

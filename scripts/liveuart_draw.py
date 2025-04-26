@@ -42,19 +42,26 @@ for y in range(28):
 uart_cursor(0, 0)
 uart_print("Hello, world!")
 
+uart_cursor(0, 1)
+uart_print(">")
+tx(1, bytes())           # get core ID
+time.sleep(0.5)
+uart_cursor(0, 2)
+uart_print("core_id")
+
 # draw a moving ball
-x = 0
-y = 1
-while True:
-    uart_cursor(x, y)
-    uart_print("O")
-    time.sleep(0.1)
-    uart_cursor(x, y)
-    uart_print(" ")
-    x += 1
-    if x >= 32:
-        x = 0
-        y += 1
-    if y >= 28:
-        y = 1
+# x = 0
+# y = 1
+# while True:
+#     uart_cursor(x, y)
+#     uart_print("O")
+#     time.sleep(0.1)
+#     uart_cursor(x, y)
+#     uart_print(" ")
+#     x += 1
+#     if x >= 32:
+#         x = 0
+#         y += 1
+#     if y >= 28:
+#         y = 1
 

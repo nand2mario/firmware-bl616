@@ -45,14 +45,9 @@ def handle_print(buf):
 
 def handle_load_data(buf):
     global newline
-    # Read length (2 bytes)
-    length = int.from_bytes(buf[1:3], 'big')
-    if len(buf) != 3 + length:
-        print(f"<load_data:BAD_COMMAND>")
-        return
     # Read data
-    data = buf[3:]
-    print(f"<load_data:{length}> {data[:8].hex()}")
+    data = buf[1:]
+    print(f"<load_data:{len(data)}> {data[:8].hex()}")
 
 def handle_overlay_state(buf):
     global newline
@@ -70,8 +65,8 @@ def handle_floppy_data(buf):
 
 def handle_disk_mgmt(buf):
     address = int.from_bytes(buf[1:3], 'big')
-    data = buf[3:5]
-    print(f"<disk_mgmt:{address}<={data}>")
+    data = int.from_bytes(buf[3:5], 'big')
+    print(f"<disk_mgmt:{address:04x}<={data:04x}>")
 
 def handle_keyboard_scancode(buf):
     scancode = buf[1:]
@@ -84,7 +79,7 @@ def handle_bl616_command():
         return
     
     len = int.from_bytes(ser.read(2), 'big')
-    if len >= 1024:
+    if len >= 2048:
         print(f"Length too large: {len}")
         return
 
@@ -109,7 +104,8 @@ def handle_bl616_command():
         else:
             print(f"<set_loading_state:BAD_COMMAND>")
     elif command == 7:  # Command 7 - load data
-        handle_load_data(buf)
+        print(f"<load_data:{len}>")
+        # handle_load_data(buf)
     elif command == 8:  # Command 8 - set overlay state
         handle_overlay_state(buf)
     elif command == 9:  # Command 9 - send HID to core
@@ -123,34 +119,45 @@ def handle_bl616_command():
     else:
         print(f"Unknown command: {command}")
 
+def check_len(buf, expected):
+    if len(buf) != expected:
+        print(f"<BAD_COMMAND>")
+        return False
+    return True
+
 def handle_fpga_command():
-    command = ser.read(1)
-    if not command:
+    sync = ser.read(1)
+    if sync != b'\xAA':
+        print(f"{chr(sync[0])}", end="")
         return
+    
+    len = int.from_bytes(ser.read(2), 'big')
+    if len >= 1024:
+        print(f"Length too large: {len}")
+        return
+
+    buf = ser.read(len)    
+
+    command = buf[0]
         
-    if command == b'\x01':  # Response joypad state
-        st = ser.read(4)
-        print(f"<joypad_state:{st.hex()}>")
-    elif command == b'\x11':  # Response core id
-        st = ser.read(1)
+    if command == 1:    # Response core id
+        check_len(buf, 2)
+        st = buf[1]
         print(f"<core_id={st}>")
-    elif command == b'\x22':  # Response config string (null-terminated)
-        string = b''
-        while True:
-            char = ser.read(1)
-            if char == b'\x00':
-                break
-            string += char
-        print(f"<config_string:{string.decode('utf-8')}>")
-    elif command == b'\x33':  # Response crc16
-        st = ser.read(2)
-        print(f"<crc16:{st.hex()}>")
-    elif command == b'\x02':  # floppy write request
-        sector = int.from_bytes(ser.read(2), 'big')
-        data = ser.read(512)
+    elif command == 2:  # Response config string (null-terminated)
+        print(f"<config_string:{buf[1:].decode('utf-8')}>")
+    elif command == 3:  # Response joypad state
+        check_len(buf, 5)
+        st = buf[1:5]
+        print(f"<joypad_state:{st.hex()}>")
+    elif command == 4:  # floppy write request
+        check_len(buf, 515)
+        sector = int.from_bytes(buf[1:3], 'big')
+        data = buf[3:515]
         print(f"<floppy_write:{sector}:{data[:4].hex()}...>")
-    elif command == b'\x03':  # floppy read request
-        sector = int.from_bytes(ser.read(2), 'big')
+    elif command == 5:  # floppy read request
+        check_len(buf, 3)
+        sector = int.from_bytes(buf[1:3], 'big')
         print(f"<floppy_read:{sector}>")
     else:
         print(f"{chr(command[0])}", end="")

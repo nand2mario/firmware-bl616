@@ -312,7 +312,9 @@ int16_t get_core_id(void) {
         xSemaphoreGive(state_mutex);
     }
 
+    // send command 1
     fpga_tx_header(0x01, 1);
+
     // TODO: use a queue for better performance
     uint64_t start = bflb_mtimer_get_time_ms();
     while (bflb_mtimer_get_time_ms() - start < 200) {
@@ -1076,7 +1078,7 @@ static int menu_loadrom(const char *dir) {
 
                                 if (active_core == core->id) {
                                     // Core is ready, load ROM
-                                    overlay_status("Loading ROM: %s", file_names[active]);
+                                    overlay_status("Loading ROM: %s\n", file_names[active]);
                                     core->load_rom(fname);
                                     success = true;
                                     break;
@@ -1088,7 +1090,7 @@ static int menu_loadrom(const char *dir) {
                                     }
                                     break;      // redraw file list
                                 } else {
-                                    overlay_status("Core failed to load");
+                                    overlay_status("Core failed to load\n");
                                     delay(1000);
                                     break;
                                 }
@@ -1139,6 +1141,8 @@ static void send_hid_to_core(void) {
         if (joy1 == OSD_KEY_CODE || joy2 == OSD_KEY_CODE || hid1 == OSD_KEY_CODE || hid2 == OSD_KEY_CODE) {
             break;
         }
+        if (!overlay_on())      // turned off by keyboard
+            break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     overlay_status("Stopped sending HID to core.");
@@ -1262,7 +1266,7 @@ static void uart1_rx_task(void *pvParameters)
                 if (ch == 0xAA) 
                     pos++;
             } else if (pos == 1) {   // len msb
-                len = ch << 8;
+                len = (uint16_t)ch << 8;
                 pos++;
             } else if (pos == 2) {   // len lsb
                 len += ch;
@@ -1270,19 +1274,21 @@ static void uart1_rx_task(void *pvParameters)
             } else if (pos == 3) {   // command type
                 type = ch;
                 pos++;
-            } else if (type == 0x1) {     // response to command 1 (get core ID)
+
+            ////// pos >= 4 //////
+            } else if (type == 1) {     // response to command 1 (get core ID)
                 if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
                     core_id = ch;
                     xSemaphoreGive(state_mutex);
                 }
                 pos = 0;
-            } else if (type == 0x2) {                 // config string
+            } else if (type == 2) {                 // config string
                 // skip for now
                 if (pos == len+2)
                     pos = 0;
                 else
                     pos++;
-            } else if (type == 0x3) {                 // periodic joypad state
+            } else if (type == 3) {                 // periodic joypad state
                 buffer[pos-4] = ch;
                 // Complete packet received
                 if (pos == 7) {
@@ -1299,7 +1305,7 @@ static void uart1_rx_task(void *pvParameters)
                     pos = 0; // Reset for next packet
                 } else
                     pos++;
-            } else if (type == 0x04) {              // floppy write
+            } else if (type == 4) {              // floppy write
                 if (pos < 6)
                     buffer[pos-4] = ch;
                 else
@@ -1317,7 +1323,7 @@ static void uart1_rx_task(void *pvParameters)
                     pos = 0;   // reset for next packet
                 } else
                     pos++;
-            } else if (type == 0x05) {              // floppy read
+            } else if (type == 5) {              // floppy read
                 buffer[pos-4] = ch;
                 if (pos == 5) {
                     // uint16_t drive = buffer[0] >> 7;
@@ -1386,8 +1392,9 @@ static void main_task(void *pvParameters)
         for (;;) {
             uint32_t now = bflb_mtimer_get_time_ms();
             if (active_core == -1) {
-                send_blank_packet();
+                // send_blank_packet();
                 active_core = get_core_id();            // 200ms timeout
+                overlay_status("core_id=%d", active_core);
                 if (active_core >= 0) redraw = true;    // redraw immediately if core is detected
             }
             // if (core < 0) continue;         // do not draw or process input if core is not ready
