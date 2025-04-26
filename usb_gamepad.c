@@ -266,6 +266,36 @@ static void xbox_parse(struct xbox_info_S *xbox) {
     }
 }
 
+// convert USB hid report to SNES joystick state
+// SNES: R L X A RT LT DN UP ST SE Y B
+// Up: W. Down: S. Left: A. Right: D. Select: Tab. Start: `. 
+// A: Space. B: Q. X: Left Shift. Y: Backspace. L: /. R: E.
+static uint16_t kbd_to_joy(uint8_t *buffer, int nbytes) {
+    // ignore modifiers in buffer[0]
+    uint16_t r = 0;
+    for (int i = 2; i < nbytes; i++) {
+        uint8_t k = buffer[i];
+        if (k == 0x50) {                        // left arrow
+            r |= (1 << 6);
+        } else if (k == 0x4f) {                 // right arrow
+            r |= (1 << 7);
+        } else if (k == 0x52) {                 // up arrow
+            r |= (1 << 4);
+        } else if (k == 0x51) {                 // down arrow
+            r |= (1 << 5);
+        } else if (k == 0x16 || k == 0x2C) {    // B: s or SPC
+            r |= 1;
+        } else if (k == 0x07 || k == 0x28) {    // A: d or ENTER
+            r |= 2;
+        } else if (k == 0x04) {                 // Y: a
+            r |= 4;
+        } else if (k == 0x1A) {                 // X: w
+            r |= 8;
+        }
+    }
+    return r;
+}
+
 // each HID client gets itws own thread which submits urbs
 // and waits for the interrupt to succeed
 static void usbh_hid_client_thread(void *arg) {
@@ -283,18 +313,24 @@ static void usbh_hid_client_thread(void *arg) {
             if(hid->nbytes > 0) {       // use first two joysticks
                 hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
                 if (hid->hid_state.joystick.js_index < 2) {
-                    xSemaphoreTake(state_mutex, portMAX_DELAY);
-                    volatile uint16_t *snes = hid->hid_state.joystick.js_index == 0 ? &hid1_state : &hid2_state;
-                    uint8_t hid_state = hid->hid_state.joystick.last_state;
-                    uint8_t hid_extra = hid->hid_state.joystick.last_state_btn_extra;
-                    //       11 10 9 8 7  6  5  4  3  2  1  0
-                    // SNES: R  L  X A RT LT DN UP ST SE Y  B
-                    // HID:            Y  B  A  X  UP DN LT RT                     
-                    // EXTRA:                ST SE       R  L
-                    *snes = (hid_state & 1) << 7 | (hid_state & 2) << 5 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
-                            (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) >> 6 |
-                            (hid_extra & 0x01) << 10 | (hid_extra & 0x02) << 10 | (hid_extra & 0x10) >> 2 | (hid_extra & 0x20) >> 2;
-                    xSemaphoreGive(state_mutex);
+                    kbd_parse(&hid->report, &hid->hid_state.kbd, hid->buffer, hid->nbytes);
+                    if (hid->report.type == REPORT_TYPE_JOYSTICK) {
+                        volatile uint16_t *snes = hid->hid_state.joystick.js_index == 0 ? &hid1_state : &hid2_state;
+                        xSemaphoreTake(state_mutex, portMAX_DELAY);
+                        uint8_t hid_state = hid->hid_state.joystick.last_state;
+                        uint8_t hid_extra = hid->hid_state.joystick.last_state_btn_extra;
+                        //       11 10 9 8 7  6  5  4  3  2  1  0
+                        // SNES: R  L  X A RT LT DN UP ST SE Y  B
+                        // HID:            Y  B  A  X  UP DN LT RT                     
+                        // EXTRA:                ST SE       R  L
+                        *snes = (hid_state & 1) << 7 | (hid_state & 2) << 5 | (hid_state & 4) << 3 | (hid_state & 8) << 1 |
+                                (hid_state & 0x10) << 5 | (hid_state & 0x20) << 3| (hid_state & 0x40) >> 6 | (hid_state & 0x80) >> 6 |
+                                (hid_extra & 0x01) << 10 | (hid_extra & 0x02) << 10 | (hid_extra & 0x10) >> 2 | (hid_extra & 0x20) >> 2;
+                        xSemaphoreGive(state_mutex);
+                    } else if (hid->report.type == REPORT_TYPE_KEYBOARD) {
+                        // allow keyboard to double as a gamepad
+                        hid1_state = kbd_to_joy(hid->buffer, hid->nbytes);
+                    }
                 }
             }
             

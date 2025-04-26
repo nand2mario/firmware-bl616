@@ -129,7 +129,7 @@ extern int16_t main_menu_config[];
 
 extern int loadpc(const char *fname);
 extern void set_loading_state(int state);
-extern void send_fbuf_data(int len);
+extern void send_fbuf_data(uint16_t len);
 extern void overlay_message(char *msg, int center);
 
 #ifndef USB_NOCACHE_RAM_SECTION
@@ -144,3 +144,17 @@ extern USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE
 extern bool floppy_mounted;
 
 extern struct bflb_device_s *uart1_dev;
+
+// len: length of payload including the command (>=1)
+extern void fpga_tx_header(int cmd, int len);
+extern void fpga_tx_byte(uint8_t b);
+
+// inline void fpga_tx(int cmd, uint16_t len, int *data) {
+//     bflb_uart_putchar(uart1_dev, 0xAA);
+//     bflb_uart_putchar(uart1_dev, len >> 8);
+//     bflb_uart_putchar(uart1_dev, len & 0xFF);
+//     for (int i = 0; i < len; i++) {
+//         bflb_uart_putchar(uart1_dev, data[i]);
+//     }
+// }
+

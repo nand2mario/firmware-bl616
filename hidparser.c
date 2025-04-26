@@ -490,9 +490,9 @@ bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t
 }
 
 void kbd_tx(const ps2_scancode_t scancode) {
-	bflb_uart_putchar(uart1_dev, 0x0C);
+	fpga_tx_header(0x0b, scancode.len+1);
 	for (int i = 0; i < scancode.len; i++) {
-		bflb_uart_putchar(uart1_dev, scancode.code[i]);
+		fpga_tx_byte(scancode.code[i]);
 	}
 }
 
@@ -504,6 +504,12 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	// we expect boot mode packets which are exactly 8 bytes long
 	if(nbytes != 8) return;
   
+	// overlay_printf("kbd_parse: nbytes=%d, ", nbytes);
+	// for (int i = 0; i < nbytes; i++) {
+	// 	overlay_printf("%02x ", buffer[i]);
+	// }
+	// overlay_printf("\n");
+
 	// check if modifier have changed
 	for(int i=0;i<8;i++) {            // scancodes are 0xE0 ~ 0xE7
 		uint8_t mask = 1 << i;
@@ -518,11 +524,15 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 		if (buffer[2+i] != state->last_report[2+i]) {
 			// key released?
 			if (state->last_report[2+i]) {
-				kbd_tx(usb_to_ps2(state->last_report[2+i], true));
+				ps2_scancode_t r = usb_to_ps2(state->last_report[2+i], true);
+				// overlay_printf("kbd_parse: release %02x -> %02x, len=%d\n", state->last_report[2+i], r.code[0], r.len);
+				kbd_tx(r);
 			}
 			// key pressed?
 			if (buffer[2+i]) {
-				kbd_tx(usb_to_ps2(buffer[2+i], false));
+				ps2_scancode_t r = usb_to_ps2(buffer[2+i], false);
+				// overlay_printf("kbd_parse: press %02x -> %02x, len=%d\n", buffer[2+i], r.code[0], r.len);
+				kbd_tx(r);
 			}
 		}
 	}

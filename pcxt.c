@@ -8,11 +8,11 @@ USB_NOCACHE_RAM_SECTION FIL ffloppy;
 
 static void IOWR(uint16_t addr, uint16_t data) {
     taskENTER_CRITICAL();
-    bflb_uart_putchar(uart1_dev, 0x0a);
-    bflb_uart_putchar(uart1_dev, addr >> 8);
-    bflb_uart_putchar(uart1_dev, addr & 0xff);
-    bflb_uart_putchar(uart1_dev, data >> 8);
-    bflb_uart_putchar(uart1_dev, data & 0xff);
+    fpga_tx_header(0x0b, 5);
+    fpga_tx_byte(addr >> 8);
+    fpga_tx_byte(addr & 0xff);
+    fpga_tx_byte(data >> 8);
+    fpga_tx_byte(data & 0xff);
     taskEXIT_CRITICAL();
 }
 

@@ -26,7 +26,7 @@
 #include "utils.h"
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
-// #define UART_CONSOLE
+#define UART_CONSOLE
 
 /////////////////////////////////////////////////////////////////////////////////
 // Global state
@@ -80,8 +80,8 @@ const char *BOARD_NAME = "unknown";
 static void init_gpio_and_uart(void)
 {
     // turn of UART0
-    uart0_dev = bflb_device_get_by_name("uart0");
-    bflb_uart_deinit(uart0_dev);
+    // uart0_dev = bflb_device_get_by_name("uart0");
+    // bflb_uart_deinit(uart0_dev);
 
     gpio_dev = bflb_device_get_by_name("gpio");
     // deinit all GPIOs
@@ -167,12 +167,11 @@ void disable_jtag_pins(void) {
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDO);
 }
 
-#ifndef UART_CONSOLE
-// disable printf
 int __attribute__((weak)) putchar(int ch) {
+    fpga_tx_header(0x05, 2);
+    fpga_tx_byte(ch);
     return ch;
 }
-#endif
 
 /////////////////////////////////////////////////////////////////////////////////
 // Overlay and other core control over UART
@@ -186,9 +185,9 @@ int overlay_on() {
 void overlay_cursor(int col, int row) {
     // uart1 command: 4 x[7:0] y[7:0]
     taskENTER_CRITICAL();
-    bflb_uart_putchar(uart1_dev, 0x04);       // command 4, move cursor
-    bflb_uart_putchar(uart1_dev, col);
-    bflb_uart_putchar(uart1_dev, row);
+    fpga_tx_header(0x04, 3);
+    fpga_tx_byte(col);
+    fpga_tx_byte(row);
     taskEXIT_CRITICAL();
 }
 
@@ -200,11 +199,11 @@ void overlay_printf(const char *fmt, ...) {
     va_end(args);
 
     taskENTER_CRITICAL();
-    bflb_uart_putchar(uart1_dev, 0x05);       // command 5, display string
-    for(int i = 0; buf[i] != '\0' && i < sizeof(buf); i++) {
-        bflb_uart_putchar(uart1_dev, buf[i]);
+    int len = strlen(buf);
+    fpga_tx_header(0x05, len+1);
+    for(int i = 0; i < len; i++) {
+        fpga_tx_byte(buf[i]);
     }
-    bflb_uart_putchar(uart1_dev, '\0');
     taskEXIT_CRITICAL();
 }
 
@@ -313,7 +312,7 @@ int16_t get_core_id(void) {
         xSemaphoreGive(state_mutex);
     }
 
-    bflb_uart_putchar(uart1_dev, 0x01);
+    fpga_tx_header(0x01, 1);
     // TODO: use a queue for better performance
     uint64_t start = bflb_mtimer_get_time_ms();
     while (bflb_mtimer_get_time_ms() - start < 200) {
@@ -333,8 +332,8 @@ int16_t get_core_id(void) {
 // set loading state
 void set_loading_state(int state) {
     taskENTER_CRITICAL();
-    bflb_uart_putchar(uart1_dev, 6);        // 6 loadingstate[7:0]
-    bflb_uart_putchar(uart1_dev, state);        
+    fpga_tx_header(0x06, 2);
+    fpga_tx_byte(state);        
     taskEXIT_CRITICAL();
 }
 
@@ -342,8 +341,8 @@ void set_loading_state(int state) {
 void overlay(int state) {
     taskENTER_CRITICAL();
     _overlay_on = state;
-    bflb_uart_putchar(uart1_dev, 8);        // 8 x[7:0]
-    bflb_uart_putchar(uart1_dev, state);        
+    fpga_tx_header(0x08, 2);
+    fpga_tx_byte(state);        
     taskEXIT_CRITICAL();
 }
 
@@ -351,7 +350,7 @@ void overlay(int state) {
 void send_blank_packet(void) {
     taskENTER_CRITICAL();
     for (int i = 0; i < 8; i++) {
-        bflb_uart_putchar(uart1_dev, 0);
+        fpga_tx_byte(0);
     }
     taskEXIT_CRITICAL();
 }
@@ -559,14 +558,11 @@ int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) 
 }
 
 // Send a romdata packet to core of len bytes in `fbuf`
-void send_fbuf_data(int len) {
+void send_fbuf_data(uint16_t len) {
     taskENTER_CRITICAL();
-    bflb_uart_putchar(uart1_dev, 7);        // 7 len[23:0] <data>
-    bflb_uart_putchar(uart1_dev, (len >> 16) & 0xff);  // MSB first
-    bflb_uart_putchar(uart1_dev, (len >> 8) & 0xff);
-    bflb_uart_putchar(uart1_dev, len & 0xff);
+    fpga_tx_header(0x07, len+1);
     for (int i = 0; i < len; i ++) {
-        bflb_uart_putchar(uart1_dev, fbuf[i]);
+        fpga_tx_byte(fbuf[i]);
     }
     taskEXIT_CRITICAL();
 }
@@ -1131,11 +1127,11 @@ static void send_hid_to_core(void) {
         uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
         get_joypad_states(&joy1, &joy2, &hid1, &hid2);
         if (first || hid1 != hid1_old || hid2 != hid2_old) {    // send HID if changed
-            bflb_uart_putchar(uart1_dev, 0x09);         
-            bflb_uart_putchar(uart1_dev, hid1 & 0xff);
-            bflb_uart_putchar(uart1_dev, hid1 >> 8);
-            bflb_uart_putchar(uart1_dev, hid2 & 0xff);
-            bflb_uart_putchar(uart1_dev, hid2 >> 8);
+            fpga_tx_header(0x09, 5);
+            fpga_tx_byte(hid1 >> 8);
+            fpga_tx_byte(hid1 & 0xff);
+            fpga_tx_byte(hid2 >> 8);
+            fpga_tx_byte(hid2 & 0xff);
             hid1_old = hid1;
             hid2_old = hid2;
             first = false;
@@ -1256,23 +1252,43 @@ static void uart1_rx_task(void *pvParameters)
     uint8_t buffer[5];
     uint8_t pos = 0;
     uint8_t type = 0;
+    uint16_t len = 0;
     
     while (1) {
         if (bflb_uart_rxavailable(uart1_dev)) {
             uint8_t ch = bflb_uart_getchar(uart1_dev);
             
-            if ((ch == 0x01 || ch == 0x11 || ch == 0x02 || ch == 0x03) && pos == 0) {        // Start of new packet
-                pos = 1;
-                type = ch;
-            } else if (type == 0x1 && pos > 0 && pos < 5) {      // periodic joypad state
-                buffer[pos-1] = ch;
+            if (pos == 0) {          // expecting 0xAA
+                if (ch == 0xAA) 
+                    pos++;
+            } else if (pos == 1) {   // len msb
+                len = ch << 8;
                 pos++;
-                
+            } else if (pos == 2) {   // len lsb
+                len += ch;
+                pos++;
+            } else if (pos == 3) {   // command type
+                type = ch;
+                pos++;
+            } else if (type == 0x1) {     // response to command 1 (get core ID)
+                if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+                    core_id = ch;
+                    xSemaphoreGive(state_mutex);
+                }
+                pos = 0;
+            } else if (type == 0x2) {                 // config string
+                // skip for now
+                if (pos == len+2)
+                    pos = 0;
+                else
+                    pos++;
+            } else if (type == 0x3) {                 // periodic joypad state
+                buffer[pos-4] = ch;
                 // Complete packet received
-                if (pos == 5) {
+                if (pos == 7) {
                     // Combine bytes into 16-bit values
-                    uint16_t joy1 = (buffer[1] << 8) | buffer[0];
-                    uint16_t joy2 = (buffer[3] << 8) | buffer[2];
+                    uint16_t joy1 = (buffer[0] << 8) | buffer[1];
+                    uint16_t joy2 = (buffer[2] << 8) | buffer[3];
                     
                     // Update global state with mutex protection
                     if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
@@ -1280,44 +1296,16 @@ static void uart1_rx_task(void *pvParameters)
                         joy2_state = joy2;
                         xSemaphoreGive(state_mutex);
                     }
-                    
                     pos = 0; // Reset for next packet
-                }
-            } else if (type == 0x11 && pos == 1) {           // response to command 1 (get core ID)
-                if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-                    core_id = ch;
-                    xSemaphoreGive(state_mutex);
-                }
-                pos = 0;
-            } else if (type == 0x03 && pos > 0) {            // floppy read
-                buffer[pos-1] = ch;
-                pos++;
-                if (pos == 2) {
-                    uint16_t drive = buffer[0] >> 7;
-                    uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
-                    if (floppy_mounted) {
-                        UINT br;
-                        f_lseek(&ffloppy, sector * 512);
-                        if (f_read(&ffloppy, fbuf, 512, &br) == FR_OK) {
-                            bflb_uart_putchar(uart1_dev, 0x0b);
-                            for (int i = 0; i < br; i++) {
-                                bflb_uart_putchar(uart1_dev, fbuf[i]);
-                            }
-                        } else {
-                            overlay_status("Failed to read floppy");
-                        }
-                    }
-                    pos = 0;   // reset for next packet
-                }
-            } else if (type == 0x02 && pos > 0) {            // floppy write
-                if (pos <= 2) 
-                    buffer[pos-1] = ch;
+                } else
+                    pos++;
+            } else if (type == 0x04) {              // floppy write
+                if (pos < 6)
+                    buffer[pos-4] = ch;
                 else
-                    fbuf[pos-3] = ch;
-                pos++;
-            
-                if (pos == 512+2) {
-                    uint16_t drive = buffer[0] >> 7;
+                    fbuf[pos-6] = ch;
+                if (pos == 6+511) {
+                    // uint16_t drive = buffer[0] >> 7;
                     uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
                     if (floppy_mounted) {
                         UINT br;
@@ -1327,11 +1315,34 @@ static void uart1_rx_task(void *pvParameters)
                         }
                     }
                     pos = 0;   // reset for next packet
-                }
+                } else
+                    pos++;
+            } else if (type == 0x05) {              // floppy read
+                buffer[pos-4] = ch;
+                if (pos == 5) {
+                    // uint16_t drive = buffer[0] >> 7;
+                    uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
+                    if (floppy_mounted) {
+                        UINT br;
+                        f_lseek(&ffloppy, sector * 512);
+                        if (f_read(&ffloppy, fbuf, 512, &br) == FR_OK) {
+                            fpga_tx_header(0x0a, br+1);
+                            for (int i = 0; i < br; i++) {
+                                fpga_tx_byte(fbuf[i]);
+                            }
+                        } else {
+                            overlay_status("Failed to read floppy");
+                        }
+                    }
+                    pos = 0;   // reset for next packet
+                } else
+                    pos++;
+
             } else {
                 pos = 0; // Reset if we get out of sync
             }
         }
+
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
