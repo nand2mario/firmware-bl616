@@ -24,6 +24,7 @@ extern "C" {
 
 #include "usbh_core.h"
 #include "ff.h"
+#include "fatfs_diskio_register.h"
 
 #include "programmer.h"
 #include "usb_gamepad.h"
@@ -157,6 +158,19 @@ static void init_gpio_and_uart(void)
     *reg_gpio_tck = GPIO_HIGH_Z;
     *reg_gpio_tdo = GPIO_HIGH_Z;
     *reg_gpio_tdi = GPIO_HIGH_Z;
+
+    // Initialize SD pins
+    board_sdh_gpio_init();
+    // bflb_gpio_init(gpio, GPIO_PIN_10, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D1
+    // bflb_gpio_init(gpio, GPIO_PIN_11, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D0
+    // bflb_gpio_init(gpio, GPIO_PIN_12, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // CLK
+    // bflb_gpio_init(gpio, GPIO_PIN_13, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // CMD
+    // bflb_gpio_init(gpio, GPIO_PIN_14, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D3
+    // bflb_gpio_init(gpio, GPIO_PIN_15, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D2
+
+    // Set GPIO 1 (physical pin 15) to high to enable SDMMC
+    bflb_gpio_init(gpio_dev, GPIO_PIN_16, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_set(gpio_dev, GPIO_PIN_16);
 }
 
 void enable_jtag_pins(void) {
@@ -385,7 +399,7 @@ void send_blank_packet(void) {
 // Core loading and other file system operations
 
 // nand2mario: these USB data structures cannot be CACHED as they are written to by hardware
-USB_NOCACHE_RAM_SECTION FATFS fs;
+USB_NOCACHE_RAM_SECTION FATFS fs_usb, fs_sd;
 USB_NOCACHE_RAM_SECTION FIL fcore;
 USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
@@ -415,11 +429,11 @@ bool load_core(const char *fname) {
     UINT bytes = 0, total = 0;
     uint64_t time_jtag = 0, time_flash = 0;
 
-    FRESULT res_sd = f_mount(&fs, "usb:", 1);
-    if (res_sd != FR_OK) {
-        overlay_printf("mount fail, res:%d\r\n", res_sd);
-        return false;
-    }
+    // FRESULT res_sd = f_mount(&fs_usb, "usb:", 1);
+    // if (res_sd != FR_OK) {
+    //     overlay_printf("mount fail, res:%d\r\n", res_sd);
+    //     return false;
+    // }
     int len = get_file_size(fname);
     overlay_status("Writing %u bytes...", len);
 
@@ -980,13 +994,23 @@ extern bool find_core_for_board(string &fname, const char *core_name);
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
 // file chosen: pwd / file_name[*choice]
 static int menu_loadrom(const char *dir) {
-    res_sd = f_mount(&fs, "usb:", 1);
-    if (res_sd != FR_OK) {
-        overlay_status("Failed to mount USB drive\n");
-        return -1;
+    // res_sd = f_mount(&fs, "usb:", 1);
+    // if (res_sd != FR_OK) {
+    //     overlay_status("Failed to mount USB drive\n");
+    //     return -1;
+    // }
+    // string sdir(dir);
+    // bool usb = (sdir.find("usb:") == 0);
+    // file_chooser.set_fs(usb ? &fs_usb : &fs_sd);
+
+    if (dir[0] == 's') {
+        res_sd = f_mount(&fs_sd, "sd:", 1);
+        if (res_sd != FR_OK) {
+            overlay_status("Failed to f_mount() SD card");
+        }
     }
+
     string fname;
-    file_chooser.set_fs(&fs);
     file_chooser.rootdir = dir;
     file_chooser.curdir = dir;
     bool r = file_chooser.choose_file(fname);
@@ -1153,7 +1177,7 @@ void init_core_list() {
         {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
         {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
         {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
-        {6, "IBM PC/XT", "usb:pc", "pctang.bin", loadpc}
+        {6, "IBM PC/XT", "sd:pc", "pctang.bin", loadpc}
     };
 
     main_menu_config = {1,2,
@@ -1187,8 +1211,6 @@ bool find_core_for_board(string &fname, const char *core_name) {
 #define MAIN_TASK_PRIORITY    3
 #define UART1_RX_TASK_STACK_SIZE  512
 #define UART1_RX_TASK_PRIORITY    3
-
-extern "C" void fatfs_usbh_driver_register(void);
 
 // Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)
@@ -1302,13 +1324,17 @@ static void main_task(void *pvParameters)
     // volatile uint32_t *reg_gpio2 = (volatile uint32_t *)0x200008cc;
     // volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
 
-    // wait for USB drive to be ready
+    // wait for drive to be ready
     overlay_status("Waiting for USB drive...");
     uint64_t start = bflb_mtimer_get_time_ms();
-    while (f_mount(&fs, "usb:", 1) != FR_OK) {
+    FRESULT res;
+    while ((res = f_mount(&fs_usb, "usb:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 2000)
         delay(100);
+    if (res != FR_OK) {
+        overlay_status("Failed to mount USB drive");
+    } else {
+        overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
     }
-    overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
     
     // load monitor core at startup
     enable_jtag_pins();
@@ -1437,7 +1463,7 @@ int main(void)
     /* Board init */
     board_init();
     init_core_list();
-    
+
     // Initialize GPIO and UART
     init_gpio_and_uart();
 
@@ -1451,7 +1477,12 @@ int main(void)
     // Initializing USB host...
     usbh_initialize();
     fatfs_usbh_driver_register();
+    f_mount(&fs_usb, "usb:", 0);        // registers USB drive
     usb_gamepad_init();
+
+    overlay_status("Initializing SDMMC...");
+    fatfs_sdh_driver_register();        // calls SDH_Init()
+    f_mount(&fs_sd, "sd:", 0);          // registers SDMMC drive 
 
     overlay_status("Creating tasks...");
     // Create the tasks

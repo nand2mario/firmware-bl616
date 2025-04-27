@@ -11,9 +11,9 @@ extern "C" {
 #define PAGESIZE 22
 #define TOPLINE 2
 
-void FileChooser::set_fs(FATFS *fs) {
-    this->fs = fs;
-}
+// void FileChooser::set_fs(FATFS *fs) {
+//     this->fs = fs;
+// }
 
 // list files in dir, starting from number `start` and return at most `len` files. `count` is set to total number of files.
 bool FileChooser::list_files(string dir, vector<FileEntry> &files, int start, int len, int *count) {
