@@ -96,7 +96,7 @@ def handle_bl616_command():
         print("<get_core_config_status>")
     elif command == 4:  # Command 4 - Cursor Move
         handle_cursor_move(buf)
-    elif command == 5:  # Command 5 - Print
+    elif command == 5 or command == 13:  # Command 5 - Print
         handle_print(buf)
     elif command == 6:  # Command 6 - set loading state
         if len == 2:

@@ -191,6 +191,23 @@ void overlay_cursor(int col, int row) {
     taskEXIT_CRITICAL();
 }
 
+// print to UART without the core displaying it. liveuart.py catches this.
+void dprint(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    taskENTER_CRITICAL();
+    int len = strlen(buf);
+    fpga_tx_header(0x0d, len+1);
+    for(int i = 0; i < len; i++) {
+        fpga_tx_byte(buf[i]);
+    }
+    taskEXIT_CRITICAL();
+}
+
 void overlay_printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -1141,7 +1158,7 @@ static void send_hid_to_core(void) {
         if (joy1 == OSD_KEY_CODE || joy2 == OSD_KEY_CODE || hid1 == OSD_KEY_CODE || hid2 == OSD_KEY_CODE) {
             break;
         }
-        if (!overlay_on())      // turned off by keyboard
+        if (overlay_on())      // turned off by keyboard
             break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }

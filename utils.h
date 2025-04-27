@@ -89,6 +89,7 @@ void overlay_clear(void);
 void overlay_cursor(int x, int y);
 int overlay_on(void);
 void overlay(int on);
+void dprint(const char *fmt, ...);
 
 // return true if core is ready. then core_id is set.
 // return false if timeout after 100ms

@@ -7,10 +7,19 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <set>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "hidparser.h"
 #include "usb2ps2.h"
 #include "utils.h"
+
+#ifdef __cplusplus
+}
+#endif
 
 #define hidp_debugf(fmt, ...) do {} while(0)
 // #define DEBUG(fmt, ...) printf(fmt, ##__VA_ARGS__)
@@ -516,40 +525,44 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	for(int i=0;i<8;i++) {            // scancodes are 0xE0 ~ 0xE7
 		uint8_t mask = 1 << i;
 		if ((buffer[0] & mask) != (state->last_report[0] & mask)) {
-			bool is_break = (buffer[0] & mask) != 0;
+			bool is_break = (buffer[0] & mask) == 0;
 			kbd_tx(usb_to_ps2(0xE0 + i, is_break));
 		}
 	}
   
 	// send scancodes
+	bool changed = false;
+	std::set<uint8_t> now, last, all;
 	for (int i = 0; i < 6; i++) {
-		if (buffer[2+i] != state->last_report[2+i]) {
-			// F12 to toggle OSD
-			if (buffer[2+i] == 0x45) {
-				overlay(!overlay_on());		// toggle OSD
-				continue;
-			} else if (state->last_report[2+i] == 0x45) {
-				// consume F12 key released event
-				continue;
-			}
-
-			// key released?
-			if (state->last_report[2+i]) {
-				ps2_scancode_t r = usb_to_ps2(state->last_report[2+i], true);
-				// overlay_printf("kbd_parse: release %02x -> %02x, len=%d\n", state->last_report[2+i], r.code[0], r.len);
-				kbd_tx(r);
-			}
-			// key pressed?
-			if (buffer[2+i]) {
-				ps2_scancode_t r = usb_to_ps2(buffer[2+i], false);
-				// overlay_printf("kbd_parse: press %02x -> %02x, len=%d\n", buffer[2+i], r.code[0], r.len);
-				kbd_tx(r);
-			}
+		if (buffer[2+i]) {
+			now.insert(buffer[2+i]);
+			all.insert(buffer[2+i]);
+		}
+		if (state->last_report[2+i]) {
+			last.insert(state->last_report[2+i]);
+			all.insert(state->last_report[2+i]);
 		}
 	}
-
+	for (auto i : all) {     // transmit different bits
+		if (!last.count(i)) {
+			// key pressed
+			ps2_scancode_t r = usb_to_ps2(i, false);
+			kbd_tx(r);
+		} 
+		if (!now.count(i)) {
+			// key released
+			ps2_scancode_t r = usb_to_ps2(i, true);
+			kbd_tx(r);
+		}
+	}
 	// save current report
 	memcpy(state->last_report, buffer, 8);
+
+	// if (changed) {
+	// 	dprint("kbd_parse: buf=%02x %02x %02x %02x %02x %02x, last=%02x %02x %02x %02x %02x %02x\n",
+	// 		buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5],
+	// 		state->last_report[0], state->last_report[1], state->last_report[2], state->last_report[3], state->last_report[4], state->last_report[5]);
+	// }
 }
 
 // collect bits from byte stream and assemble them into a signed word

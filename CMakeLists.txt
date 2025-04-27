@@ -6,6 +6,8 @@ set(CONFIG_CHERRYUSB_HOST 1)
 set(CONFIG_FATFS 1)
 set(CONFIG_FATFS_USBH 1)
 
+set(CMAKE_CXX_STANDARD 17)
+
 if(TANG_BOARD STREQUAL "mega60k")
     add_definitions(-DTANG_MEGA60K)
 elseif(TANG_BOARD STREQUAL "mega138k")
@@ -24,7 +26,7 @@ find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
 
 sdk_add_include_directories(.)
 
-target_sources(app PRIVATE programmer.c hidparser.c usb_gamepad.c pcxt.c utils.c usb2ps2.cpp)
+target_sources(app PRIVATE programmer.c hidparser.cpp usb_gamepad.c pcxt.c utils.c usb2ps2.cpp)
 sdk_set_main_file(main.c)
 
 project(tangcore)
