@@ -98,7 +98,6 @@ bool get_core_status(void);
 void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2);
 extern int joy_choice(int start_line, int len, int *active, int overlay_key_code);
 extern void send_blank_packet(void);
-bool find_core_for_board(char *fname, const char *core_name);
 
 extern void bflb_uart_set_console(struct bflb_device_s *dev);
 extern char *strcasestr(const char *haystack, const char *needle);
@@ -120,18 +119,17 @@ struct core_info {
     const char *core_file;          // core file in cores/
     int (*load_rom)(const char *fname);
 };
-extern struct core_info core_info_list[];
-extern int16_t main_menu_config[];
 
 #define OPTION_OSD_KEY_SELECT_START 1
 #define OPTION_OSD_KEY_SELECT_RIGHT 2
 
+extern int option_osd_key;
 #define OSD_KEY_CODE (option_osd_key == OPTION_OSD_KEY_SELECT_START ? 0xC : 0x84)
 
 extern int loadpc(const char *fname);
 extern void set_loading_state(int state);
 extern void send_fbuf_data(uint16_t len);
-extern void overlay_message(char *msg, int center);
+extern void overlay_message(const char *msg, int center);
 
 #ifndef USB_NOCACHE_RAM_SECTION
 #define USB_NOCACHE_RAM_SECTION __attribute__((section(".noncacheable")))

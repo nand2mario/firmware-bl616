@@ -10,6 +10,8 @@
 
 #include <stdarg.h>
 #include <string.h>
+#include <vector>
+#include "file_chooser.hpp"
 
 extern "C" {
 
@@ -46,7 +48,6 @@ struct bflb_device_s *uart1_dev;
 
 // USB and fatfs
 struct usbh_msc *msc;
-char fname[1024];
 
 // Tasks and shared state
 TaskHandle_t main_task_handle;
@@ -252,14 +253,14 @@ void overlay_status(const char *fmt, ...) {
 // show a pop-up message, press any key to discard (caller needs to redraw screen)
 // msg: could be multi-line (separate with \n), max 10 lines
 // center: whether to center the text
-void overlay_message(char *msg, int center) {
+void overlay_message(const char *msg, int center) {
     // count number of lines and max width
     int w[10], lines=10, maxw = 0;
     int len = strlen(msg);
-    char *end = msg + len;
-    char *sol = msg;
+    const char *end = msg + len;
+    const char *sol = msg;
     for (int i = 0; i < 10; i++) {
-        char *eol = strchr(sol, '\n');
+        const char *eol = strchr(sol, '\n');
         if (eol) { // found \n
             w[i] = min(eol - sol, 26);
             maxw = max(w[i], maxw);
@@ -291,7 +292,7 @@ void overlay_message(char *msg, int center) {
                 overlay_printf(" ");
         }
     // print text
-    char *s = msg;
+    const char *s = msg;
     for (int i = 0; i < lines; i++) {
         if (center)
             overlay_cursor(16-(w[i]>>1), y0+i+1);
@@ -389,15 +390,17 @@ USB_NOCACHE_RAM_SECTION FIL fcore;
 USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
 FRESULT res_sd;
-#define PAGESIZE 22
-#define TOPLINE 2
-#define PWD_SIZE 1024
-char pwd[PWD_SIZE];
+FileChooser file_chooser;
+
+// #define PAGESIZE 22
+// #define TOPLINE 2
+// #define PWD_SIZE 1024
+// char pwd[PWD_SIZE];
 // one page of file names to display
-char file_names[PAGESIZE][256];
-int file_dir[PAGESIZE];         // this file is a directory
-int file_sizes[PAGESIZE];       
-int file_len;		            // number of files on this page
+// char file_names[PAGESIZE][256];
+// int file_dir[PAGESIZE];         // this file is a directory
+// int file_sizes[PAGESIZE];       
+// int file_len;		            // number of files on this page
 
 uint32_t get_file_size(const char *fname) {
     FILINFO fno;
@@ -528,61 +531,6 @@ bool load_core(const char *fname) {
 load_core_close:
     f_close(&fcore);
     return res;
-}
-
-// starting from `start`, load `len` file names into file_names, 
-// file_dir. 
-// `*count` is set to number of all valid entries and `file_len` is
-// set to valid entries on this page.
-// `filter` when non-null is a function that takes a file name and returns true if the file is
-// to be included in the list.
-// return: 0 if successful
-int load_dir(char *dir, int start, int len, int *count, bool (*filter)(char *)) {
-    // DEBUG("load_dir: %s, start=%d, len=%d\n", dir, start, len);
-    int cnt = 0;
-    DIR d;
-    file_len = 0;
-
-    if (f_opendir(&d, dir) != 0) {
-        return -1;
-    }
-    // an entry to return to parent dir or main menu 
-    int is_root = dir[1] == '\0';
-    if (start == 0 && len > 0) {
-        if (is_root) {
-            strncpy(file_names[0], "<< Return to main menu", 256);
-            file_dir[0] = 0;
-        } else {
-            strncpy(file_names[0], "..", 256);
-            file_dir[0] = 1;
-        }
-        file_len++;
-    }
-    cnt++;
-
-    // generate all file entries
-    FILINFO fno;
-    while (f_readdir(&d, &fno) == FR_OK) {
-        if (fno.fname[0] == 0)
-            break;
-        if ((fno.fattrib & AM_HID) || (fno.fattrib & AM_SYS))
-             // skip hidden and system files
-            continue;
-        if (filter && !filter(fno.fname))
-            continue;
-        if (cnt >= start && file_len < len) {
-            strncpy(file_names[file_len], fno.fname, 256);
-            file_dir[file_len] = fno.fattrib & AM_DIR;
-            file_sizes[file_len] = fno.fsize;
-            file_len++;
-//            DEBUG("%s\n", fno.fname);
-        }
-        cnt++;
-    }
-    f_closedir(&d);
-    *count = cnt;
-    // DEBUG("load_dir: count=%d\n", cnt);
-    return 0;
 }
 
 // Send a romdata packet to core of len bytes in `fbuf`
@@ -1022,6 +970,11 @@ static void menu_in_pc() {
 
 }
 
+extern vector<core_info> core_info_list;
+extern vector<int16_t> main_menu_config;
+extern bool find_core_for_board(string &fname, const char *core_name);
+
+
 // Menus for "NES", "SNES" ... entries
 // dir: initial dir
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
@@ -1032,143 +985,75 @@ static int menu_loadrom(const char *dir) {
         overlay_status("Failed to mount USB drive\n");
         return -1;
     }
+    string fname;
+    file_chooser.set_fs(&fs);
+    file_chooser.rootdir = dir;
+    file_chooser.curdir = dir;
+    bool r = file_chooser.choose_file(fname);
+    if (!r) {
+        overlay_status("No file chosen");
+        return 1;
+    }
 
-    int page = 0, pages, total;
-    int active = 0;
-    strncpy(pwd, dir, PWD_SIZE);
-    while (1) {
-        overlay_clear();
-        int r = load_dir(pwd, page*PAGESIZE, PAGESIZE, &total, NULL);
-        if (r == 0) {
-            pages = (total+PAGESIZE-1) / PAGESIZE;
-            overlay_status("Page ");
-            overlay_printf("%d/%d", page+1, pages);
-            if (active > file_len-1)
-                active = file_len-1;
-            for (int i = 0; i < PAGESIZE; i++) {
-                int idx = page*PAGESIZE + i;
-                overlay_cursor(2, i+TOPLINE);
-                if (idx < total) {
-                    overlay_printf(file_names[i]);
-                    if (idx != 0 && file_dir[i])
-                        overlay_printf("/");
-                }
-            }
-            delay(300);
-            while (1) {
-                int r = joy_choice(TOPLINE, file_len, &active, OSD_KEY_CODE);
-                if (r == 1 || r == 4) {
-                    if (strcmp(pwd, dir) == 0 && page == 0 && active == 0) {
-                        // return to main menu
-                        return 1;
-                    } else if (file_dir[active]) {
-                        if (file_names[active][0] == '.' && file_names[active][1] == '.') {
-                            // return to parent dir
-                            // message(file_names[active], 1);
-                            char *slash = strrchr(pwd, '/');
-                            if (slash)
-                                *slash = '\0';
-                        } else {								// enter sub dir
-                            strncat(pwd, "/", PWD_SIZE);
-                            strncat(pwd, file_names[active], PWD_SIZE);
-                        }
-                        active = 0;
-                        page = 0;
+    // now proceed to load the core and ROM
+    joy1_state = 0; joy2_state = 0; // clear joypad states
+
+    // dir determines the type of the ROM
+    if (fname.find("usb:cores") == 0) {
+        overlay_status("Core: %s", fname.c_str());
+        enable_jtag_pins();
+        load_core(fname.c_str());
+        _overlay_on = 1;                // turn on overlay after core is loaded
+        disable_jtag_pins();
+        return 0;       // return to main menu
+    } 
+
+    // user chose a ROM file
+    active_core = get_core_id();
+    // find core info entry
+    struct core_info *core = NULL;
+    for (auto c: core_info_list) {
+        if (fname.find(c.rom_dir) == 0) {
+            core = &c;
+            overlay_status("ROM for: %s", core->display_name);
+        }
+    }
+
+    // load core if needed
+    if (core != NULL) {
+        // load core if needed
+        if (active_core != core->id) {
+            string fname_core;
+            if (find_core_for_board(fname_core, core->core_file)) {
+                // load core
+                enable_jtag_pins();
+                load_core(fname_core.c_str());
+                _overlay_on = 1;
+                disable_jtag_pins();
+
+                // allow 2 seconds for core to start
+                uint64_t start = bflb_mtimer_get_time_ms();
+                while (bflb_mtimer_get_time_ms() - start < 2000) {
+                    send_blank_packet();
+                    active_core = get_core_id();
+                    if (active_core == core->id)
                         break;
-                    } else {
-                        // int res = 1;
-                        strncpy(fname, pwd, 1024);
-                        strncat(fname, "/", 1024);
-                        strncat(fname, file_names[active], 1024);
-
-                        joy1_state = 0; joy2_state = 0; // clear joypad states
-
-                        // pwd determines the type of the ROM
-                        if (prefix("usb:cores", pwd)) {
-                            overlay_status("Core: %s", file_names[active]);
-                            enable_jtag_pins();
-                            load_core(fname);
-                            _overlay_on = 1;                // turn on overlay after core is loaded
-                            disable_jtag_pins();
-                            return 0;       // return to main menu
-                        } else {
-                            bool success = false;
-                            active_core = get_core_id();
-                            // find core info entry
-                            struct core_info *core = NULL;
-                            for (int i = 0; core_info_list[i].id != 0; i++) {
-                                if (prefix(core_info_list[i].rom_dir, pwd)) {
-                                    core = &core_info_list[i];
-                                    overlay_status("ROM for: %s", core->display_name);
-                                }
-                            }
-
-                            // load core if needed
-                            if (core != NULL) {
-                                if (active_core != core->id) {
-                                    char *fname_core = (char*)malloc(1024);
-                                    if (!fname_core) {
-                                        overlay_status("Failed to allocate memory");
-                                        delay(1000);
-                                        break;
-                                    }
-                                    if (find_core_for_board(fname_core, core->core_file)) {
-                                        // load core
-                                        enable_jtag_pins();
-                                        load_core(fname_core);
-                                        _overlay_on = 1;
-                                        disable_jtag_pins();
-
-                                        // allow 2 seconds for core to start
-                                        uint64_t start = bflb_mtimer_get_time_ms();
-                                        while (bflb_mtimer_get_time_ms() - start < 2000) {
-                                            send_blank_packet();
-                                            active_core = get_core_id();
-                                            if (active_core == core->id)
-                                                break;
-                                        }
-                                    } 
-                                    free(fname_core);
-                                }
-
-                                if (active_core == core->id) {
-                                    // Core is ready, load ROM
-                                    overlay_status("Loading ROM: %s\n", file_names[active]);
-                                    core->load_rom(fname);
-                                    success = true;
-                                    break;
-
-                                    if (!success) {
-                                        overlay_status("No core for: %s", pwd);
-                                    } else {
-                                        overlay_status("ROM loaded");
-                                    }
-                                    break;      // redraw file list
-                                } else {
-                                    overlay_status("Core failed to load\n");
-                                    delay(1000);
-                                    break;
-                                }
-                            }
-                        }
-                    }
                 }
-                if (r == 2 && page < pages-1) {
-                    page++;
-                    break;
-                } else if (r == 3 && page > 0) {
-                    page--;
-                    break;
-                }
-                delay(10);
-            }
+            } 
+        }
+
+        // Attemp to load ROM
+        if (active_core == core->id) {
+            overlay_status("Loading ROM: %s\n", fname.c_str());
+            core->load_rom(fname.c_str());
+            return 1;
         } else {
-            overlay_status("Error opening director");
-            overlay_printf(" %d", r);
+            overlay_status("Core failed to load\n");
+            delay(1000);
             return -1;
         }
-    }    
-
+    }
+    return -1;
 }
 
 static void menu_options(void) {
@@ -1204,7 +1089,8 @@ static void send_hid_to_core(void) {
 }
 
 // // (R L X A RT LT DN UP START SELECT Y B)
-// Return 1 if a button was pressed, 0 otherwise
+// Return: 1 button B pressed, 4: button A pressed, 2: next page, 3: previous page
+// active is the entry chosen
 int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     if (*active < 0 || *active >= len)
         *active = 0;
@@ -1255,46 +1141,45 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
 }
 
 // null-terminated list of core info
-struct core_info core_info_list[] = {
-    {1, "NES", "usb:nes", "nestang.bin", loadnes},
-    {2, "SNES", "usb:snes", "snestang.bin", loadsnes},
-    {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
-    {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
-    {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
-    {6, "IBM PC/XT", "usb:pc", "pctang.bin", loadpc},
-    {0, NULL, NULL, NULL, NULL}
-};
-
+std::vector<core_info> core_info_list;
 // Main menu listing:
 // >0: core id, -1: cores menu, -2: options menu, 0: end of list
-int16_t main_menu_config[] = 
-   {1,2,
+std::vector<int16_t> main_menu_config;
+
+void init_core_list() {
+    core_info_list = {
+        {1, "NES", "usb:nes", "nestang.bin", loadnes},
+        {2, "SNES", "usb:snes", "snestang.bin", loadsnes},
+        {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
+        {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
+        {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
+        {6, "IBM PC/XT", "usb:pc", "pctang.bin", loadpc}
+    };
+
+    main_menu_config = {1,2,
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
-    3,4,5,6,
+        3,4,5,6,
 #endif
-    -1, -2, 0};
+        -1, -2
+    };
+}
 
 // Find a core file in the search order:
 // usb:cores/${BOARD_NAME}/${core_name}
 // usb:cores/${core_name}
-bool find_core_for_board(char *fname, const char *core_name) {
+bool find_core_for_board(string &fname, const char *core_name) {
     // check usb:cores/${BOARD_NAME}/${core_name}
-    strncpy(fname, "usb:cores/", 1024);
-    strncat(fname, BOARD_NAME, 1024);
-    strncat(fname, "/", 1024);
-    strncat(fname, core_name, 1024);
+    fname = string("usb:cores/") + BOARD_NAME + "/" + core_name;
     FILINFO fno;
-    if (f_stat(fname, &fno) == FR_OK && fno.fsize > 0) {
+    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
         return true;
     }
 
     // check usb:cores/${core_name}
-    strncpy(fname, "usb:cores/", 1024);
-    strncat(fname, core_name, 1024);
-    if (f_stat(fname, &fno) == FR_OK && fno.fsize > 0) {
+    fname = string("usb:cores/") + core_name;
+    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
         return true;
     }
-
     return false;
 }
 
@@ -1427,18 +1312,16 @@ static void main_task(void *pvParameters)
     
     // load monitor core at startup
     enable_jtag_pins();
+    string fname;
     if (find_core_for_board(fname, "monitor.bin")) {
-        load_core(fname);
+        load_core(fname.c_str());
     } else {
         overlay_status("No monitor.bin found for board.");
     }
     disable_jtag_pins();
 
     int line_start;
-    int menu_cnt = 0;
-    for (int i = 0; main_menu_config[i] != 0; i++) {
-        menu_cnt++;
-    }
+    int menu_cnt = main_menu_config.size();
     line_start = 13 - (menu_cnt+2+2) / 2;       // 2 lines for version, 2 lines for "TangCore"
 
     while (1) {
@@ -1553,6 +1436,7 @@ int main(void)
 {
     /* Board init */
     board_init();
+    init_core_list();
     
     // Initialize GPIO and UART
     init_gpio_and_uart();
