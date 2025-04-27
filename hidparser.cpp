@@ -515,12 +515,6 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	// we expect boot mode packets which are exactly 8 bytes long
 	if(nbytes != 8) return;
   
-	// overlay_printf("kbd_parse: nbytes=%d, ", nbytes);
-	// for (int i = 0; i < nbytes; i++) {
-	// 	overlay_printf("%02x ", buffer[i]);
-	// }
-	// overlay_printf("\n");
-
 	// check if modifier have changed
 	for(int i=0;i<8;i++) {            // scancodes are 0xE0 ~ 0xE7
 		uint8_t mask = 1 << i;
@@ -544,6 +538,10 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 		}
 	}
 	for (auto i : all) {     // transmit different bits
+		if (i == 0x45) {     // F12 toggles the OSD, do not send to the core
+			if (!last.count(i)) overlay(!overlay_on());
+			continue;
+		}
 		if (!last.count(i)) {
 			// key pressed
 			ps2_scancode_t r = usb_to_ps2(i, false);

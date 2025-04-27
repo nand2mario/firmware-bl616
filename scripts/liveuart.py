@@ -59,9 +59,9 @@ def handle_hid_to_core(buf):
     print(f"<hid: {hid.hex()}>")
 
 def handle_floppy_data(buf):
-    sector = int.from_bytes(buf[1:3], 'big')
-    data = buf[3:]
-    print(f"<floppy_data:{sector}:{data[:4].hex()}...>")
+    check_len(buf, 513)
+    data = buf[1:]
+    print(f"<floppy_data:{data[:4].hex()}...>")
 
 def handle_disk_mgmt(buf):
     address = int.from_bytes(buf[1:3], 'big')
