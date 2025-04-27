@@ -27,6 +27,6 @@ find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
 sdk_add_include_directories(.)
 
 target_sources(app PRIVATE programmer.c hidparser.cpp usb_gamepad.c pcxt.c utils.c usb2ps2.cpp)
-sdk_set_main_file(main.c)
+sdk_set_main_file(main.cpp)
 
 project(tangcore)

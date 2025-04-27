@@ -512,6 +512,8 @@ void kbd_tx(const ps2_scancode_t scancode) {
 // F12 toggles the OSD state. In OSD, arrow keys and space/enter are used for navigation.
 void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	       const unsigned char *buffer, int nbytes) {
+	bool send = !overlay_on();
+
 	// we expect boot mode packets which are exactly 8 bytes long
 	if(nbytes != 8) return;
   
@@ -520,7 +522,7 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 		uint8_t mask = 1 << i;
 		if ((buffer[0] & mask) != (state->last_report[0] & mask)) {
 			bool is_break = (buffer[0] & mask) == 0;
-			kbd_tx(usb_to_ps2(0xE0 + i, is_break));
+			if (send) kbd_tx(usb_to_ps2(0xE0 + i, is_break));
 		}
 	}
   
@@ -545,12 +547,12 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 		if (!last.count(i)) {
 			// key pressed
 			ps2_scancode_t r = usb_to_ps2(i, false);
-			kbd_tx(r);
+			if (send) kbd_tx(r);
 		} 
 		if (!now.count(i)) {
 			// key released
 			ps2_scancode_t r = usb_to_ps2(i, true);
-			kbd_tx(r);
+			if (send) kbd_tx(r);
 		}
 	}
 	// save current report

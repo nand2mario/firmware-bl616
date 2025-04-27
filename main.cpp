@@ -11,6 +11,8 @@
 #include <stdarg.h>
 #include <string.h>
 
+extern "C" {
+
 #include "board.h"
 #include "bl616_glb.h"
 #include "bflb_gpio.h"
@@ -24,6 +26,8 @@
 #include "programmer.h"
 #include "usb_gamepad.h"
 #include "utils.h"
+
+}
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
 #define UART_CONSOLE
@@ -129,12 +133,14 @@ static void init_gpio_and_uart(void)
         // all other boards have 26Mhz XTAL
         .baudrate = 2000000 * 40 / 26,
 #endif
+        .direction = UART_DIRECTION_TXRX,
         .data_bits = UART_DATA_BITS_8,
         .stop_bits = UART_STOP_BITS_1,
         .parity    = UART_PARITY_NONE,
+        .bit_order = UART_LSB_FIRST,
+        .flow_ctrl = 0,  /* No CTS/RTS flow control */
         .tx_fifo_threshold = 7,
         .rx_fifo_threshold = 7,
-        .flow_ctrl = 0,  /* No CTS/RTS flow control */
     };
     /* Get handle to UART1 */
     uart1_dev = bflb_device_get_by_name("uart1");
@@ -382,7 +388,7 @@ USB_NOCACHE_RAM_SECTION FATFS fs;
 USB_NOCACHE_RAM_SECTION FIL fcore;
 USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
-FRESULT res_sd = 0;
+FRESULT res_sd;
 #define PAGESIZE 22
 #define TOPLINE 2
 #define PWD_SIZE 1024
@@ -401,6 +407,11 @@ uint32_t get_file_size(const char *fname) {
 }
 
 bool load_core(const char *fname) {
+    uint64_t writetdi_time_start;
+    uint64_t time_total;
+    UINT bytes = 0, total = 0;
+    uint64_t time_jtag = 0, time_flash = 0;
+
     FRESULT res_sd = f_mount(&fs, "usb:", 1);
     if (res_sd != FR_OK) {
         overlay_printf("mount fail, res:%d\r\n", res_sd);
@@ -443,7 +454,7 @@ bool load_core(const char *fname) {
     }
 
     BYTE *fbuf_cached;
-    fbuf_cached = malloc(BLOCK_SIZE);
+    fbuf_cached = (BYTE*)malloc(BLOCK_SIZE);
     if (!fbuf_cached) {
         overlay_printf("Cannot malloc buffer\r\n");
         goto load_core_close;
@@ -451,11 +462,9 @@ bool load_core(const char *fname) {
 
 #define JTAG_FAST
 
-    UINT bytes = 0, total = 0;
-    uint64_t time_total = bflb_mtimer_get_time_us();
-    uint64_t time_jtag = 0, time_flash = 0;
     extern uint64_t jtag_writetdi_time;
-    uint64_t writetdi_time_start = jtag_writetdi_time;
+    writetdi_time_start = jtag_writetdi_time;
+    time_total = bflb_mtimer_get_time_us();
 #ifdef JTAG_FAST
     taskENTER_CRITICAL();
     jtag_enter_gpio_out_mode();
@@ -589,6 +598,8 @@ void send_fbuf_data(uint16_t len) {
 // Load a NES ROM
 // return 0 if successful
 int loadnes(const char *fname) {
+    unsigned int off = 0, br, total = 0;
+    unsigned int size;
     int r = 1;
     DEBUG("loadnes start\n");
 
@@ -604,8 +615,7 @@ int loadnes(const char *fname) {
         overlay_status("Cannot open file");
         goto loadnes_end;
     }
-    unsigned int off = 0, br, total = 0;
-    unsigned int size = get_file_size(fname);
+    size = get_file_size(fname);
 
     // load actual ROM
     set_loading_state(1);
@@ -706,13 +716,13 @@ int loadsnes(const char *fname) {
         p = strcasestr(fname, ".smc");
     if (p == NULL) {
         overlay_message("Only .smc or .sfc supported", 1);
-        goto loadsnes_end;
+        return r;
     }
 
     r = f_open(&fcore, fname, FA_READ);
     if (r) {
         overlay_status("Cannot open file");
-        goto loadsnes_end;
+        return r;
     }
     unsigned int br, total = 0;
     int size = get_file_size(fname);
@@ -775,7 +785,6 @@ loadsnes_snes_end:
     set_loading_state(0);	// turn off game loading, this starts SNES
 loadsnes_close_file:
     f_close(&fcore);
-loadsnes_end:
     return r;
 }
 
@@ -814,13 +823,13 @@ void gba_load_bios() {
 
 int loadgba(const char *fname) {
     DEBUG("loadgba start\n");
-    FRESULT r = -1;
+    FRESULT r = FR_NO_FILE;
 
     // check extension .gba
     char *p = strcasestr(fname, ".gba");
     if (p == NULL) {
         overlay_message("Only .gba supported", 1);
-        goto loadgba_end;
+        return r;
     }
 
     unsigned int size = get_file_size(fname);
@@ -828,7 +837,7 @@ int loadgba(const char *fname) {
     r = f_open(&fcore, fname, FA_READ);
     if (r) {
         overlay_status("Cannot open file");
-        goto loadgba_end;
+        return r;
     }
     unsigned int off = 0, br, total = 0;
 
@@ -869,13 +878,12 @@ int loadgba(const char *fname) {
 loadgba_close:
     set_loading_state(0);   // turn off game loading, this starts the core
     f_close(&fcore);
-loadgba_end:
     return r;
 }
 
 int loadmd(const char *fname) {
     DEBUG("loadmd start\n");
-    FRESULT r = -1;
+    FRESULT r = FR_NO_FILE;
 
     // check extension .bin
     char *p = strcasestr(fname, ".bin");
@@ -883,13 +891,13 @@ int loadmd(const char *fname) {
         p = strcasestr(fname, ".md");
     if (p == NULL) {
         overlay_message("Only .bin or .md supported", 1);
-        goto loadmd_end;
+        return r;
     }
 
     r = f_open(&fcore, fname, FA_READ);
     if (r) {
         overlay_status("Cannot open file");
-        goto loadmd_end;
+        return r;
     }
     unsigned int off = 0, br, total = 0;
     unsigned int size = get_file_size(fname);
@@ -923,25 +931,24 @@ int loadmd(const char *fname) {
 loadmd_close_file:
     set_loading_state(0);   // turn off game loading, this starts the core
     f_close(&fcore);
-loadmd_end:
     return r;
 }
 
 int loadsms(const char *fname) {
     DEBUG("loadsms start\n");
-    FRESULT r = -1;
+    FRESULT r = FR_NO_FILE;
 
     // check extension .bin
     char *p = strcasestr(fname, ".sms");
     if (p == NULL) {
         overlay_message("Only .sms, .gg, and .sg supported", 1);
-        goto loadmd_end;
+        return r;
     }
 
     r = f_open(&fcore, fname, FA_READ);
     if (r) {
         overlay_status("Cannot open file");
-        goto loadmd_end;
+        return r;
     }
     unsigned int off = 0, br, total = 0;
     unsigned int size = get_file_size(fname);
@@ -976,13 +983,44 @@ int loadsms(const char *fname) {
 loadmd_close_file:
     set_loading_state(0);   // turn off game loading, this starts the core
     f_close(&fcore);
-loadmd_end:
     return r;
 }
 
 
 /////////////////////////////////////////////////////////////////////////////////
 // Menu display and user interaction
+
+// std::string choose_curfile;
+
+// In-core menu for PCXT
+static void menu_in_pc() {
+    while (1) {
+        overlay_clear();
+        overlay_cursor(0, 10);
+        //              01234567890123456789012345678901
+        overlay_printf("        - PCXT Menu -\n");
+        overlay_cursor(0, 12);
+        overlay_printf("  Load A:\n");
+        overlay_cursor(0, 13);
+        overlay_printf("  Load B:\n");
+        overlay_cursor(0, 14);
+        overlay_printf("  Reboot\n");
+        overlay_cursor(0, 15);
+        overlay_printf("  << Home\n");
+
+        int active = 0;
+        int r = joy_choice(12, 4, &active, OSD_KEY_CODE);
+        if (r == 1) {
+            // switch (active) {
+            //     case 0:
+            //     case 1:
+            //         if (choose_file()) {
+
+            //         }
+        }
+    }
+
+}
 
 // Menus for "NES", "SNES" ... entries
 // dir: initial dir
@@ -1068,7 +1106,7 @@ static int menu_loadrom(const char *dir) {
                             // load core if needed
                             if (core != NULL) {
                                 if (active_core != core->id) {
-                                    char *fname_core = malloc(1024);
+                                    char *fname_core = (char*)malloc(1024);
                                     if (!fname_core) {
                                         overlay_status("Failed to allocate memory");
                                         delay(1000);
@@ -1141,7 +1179,7 @@ static void menu_options(void) {
 static void send_hid_to_core(void) {
     uint16_t hid1_old = 0, hid2_old = 0;
     bool first = true;
-    overlay_status("Start sending HID to core...");
+    dprint("Start sending HID to core...");
     while (1) {
         uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
         get_joypad_states(&joy1, &joy2, &hid1, &hid2);
@@ -1162,7 +1200,7 @@ static void send_hid_to_core(void) {
             break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    overlay_status("Stopped sending HID to core.");
+    dprint("Stopped sending HID to core.");
 }
 
 // // (R L X A RT LT DN UP START SELECT Y B)
@@ -1265,7 +1303,7 @@ bool find_core_for_board(char *fname, const char *core_name) {
 #define UART1_RX_TASK_STACK_SIZE  512
 #define UART1_RX_TASK_PRIORITY    3
 
-extern void fatfs_usbh_driver_register(void);
+extern "C" void fatfs_usbh_driver_register(void);
 
 // Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)

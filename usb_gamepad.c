@@ -313,7 +313,7 @@ static void usbh_hid_client_thread(void *arg) {
             if(hid->nbytes > 0) {       // use first two joysticks
                 hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
                 if (hid->hid_state.joystick.js_index < 2) {
-                    hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
+                    // hid_parse(&hid->report, &hid->hid_state, hid->buffer, hid->nbytes);
                     if (hid->report.type == REPORT_TYPE_JOYSTICK) {
                         volatile uint16_t *snes = hid->hid_state.joystick.js_index == 0 ? &hid1_state : &hid2_state;
                         xSemaphoreTake(state_mutex, portMAX_DELAY);

@@ -73,6 +73,16 @@ int loadpc(const char *fname) {
         sectors_per_track = 9;
         total_sectors = 360;
         heads = 1;
+    } else if (kb == 160) {
+        cylinders = 40;
+        sectors_per_track = 8;
+        total_sectors = 320;
+        heads = 1;
+    } else if (kb == 320) {
+        cylinders = 40;
+        sectors_per_track = 8;
+        total_sectors = 640;
+        heads = 2;
     } else if (kb == 720) {
         cylinders = 80;
         sectors_per_track = 18;
@@ -84,7 +94,7 @@ int loadpc(const char *fname) {
         total_sectors = 2880;
         heads = 2;
     } else {
-        overlay_message( "Unsupported floppy image size", 1);
+        overlay_message( "Unsupported image size", 1);
         return -1;
     }
     DEBUG("set floppy parameters\n");
