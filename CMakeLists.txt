@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 set(CONFIG_FREERTOS 1)
 set(CONFIG_CHERRYUSB 1)
 set(CONFIG_CHERRYUSB_HOST 1)
@@ -7,8 +11,6 @@ set(CONFIG_BSP_SDH_SDCARD 1)
 set(CONFIG_FATFS 1)
 set(CONFIG_FATFS_USBH 1)
 set(CONFIG_FATFS_SDH_SDCARD 1)
-
-set(CMAKE_CXX_STANDARD 17)
 
 if(TANG_BOARD STREQUAL "mega60k")
     add_definitions(-DTANG_MEGA60K)
@@ -26,9 +28,22 @@ endif()
 
 find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
 
-sdk_add_include_directories(.)
+# Add include directories
+sdk_add_include_directories(
+    . usb fpga ui core utils
+)
 
-target_sources(app PRIVATE programmer.c hidparser.cpp usb_gamepad.c pcxt.c utils.c usb2ps2.cpp file_chooser.cpp)
+# Add source files
+file(GLOB_RECURSE MY_SOURCES
+    "usb/*.cpp"
+    "fpga/*.cpp"
+    "ui/*.cpp"
+    "core/*.cpp"
+    "utils/*.cpp"
+)
+
+target_sources(app PRIVATE ${MY_SOURCES})
 sdk_set_main_file(main.cpp)
 
-project(tangcore)
+project(firmware-bl616 CXX)
+

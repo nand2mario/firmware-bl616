@@ -11,10 +11,8 @@
 #include <stdarg.h>
 #include <string.h>
 #include <vector>
-#include "file_chooser.hpp"
 
 extern "C" {
-
 #include "board.h"
 #include "bl616_glb.h"
 #include "bflb_gpio.h"
@@ -25,12 +23,15 @@ extern "C" {
 #include "usbh_core.h"
 #include "ff.h"
 #include "fatfs_diskio_register.h"
+}
 
+#include "file_chooser.hpp"
 #include "programmer.h"
 #include "usb_gamepad.h"
 #include "utils.h"
-
-}
+#include "cores.h"
+#include "overlay.h"
+#include "init.h"
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
 #define UART_CONSOLE
@@ -53,16 +54,6 @@ struct usbh_msc *msc;
 // Tasks and shared state
 TaskHandle_t main_task_handle;
 TaskHandle_t uart1_rx_task_handle;
-volatile uint16_t joy1_state = 0;
-volatile uint16_t joy2_state = 0;
-volatile int16_t core_id = -1;
-volatile uint16_t hid1_state = 0;
-volatile uint16_t hid2_state = 0;
-SemaphoreHandle_t state_mutex;              // for all global state access
-
-// Core specific state
-bool gba_bios_loaded;
-bool gba_missing_bios_warned;
 
 #ifdef TANG_CONSOLE60K
 const char *BOARD_NAME = "console60k";
@@ -80,320 +71,13 @@ const char *BOARD_NAME = "nano20k";
 const char *BOARD_NAME = "unknown";
 #endif
 
-/////////////////////////////////////////////////////////////////////////////////
-// GPIO and UART
-
-static void init_gpio_and_uart(void)
-{
-    // turn of UART0
-    // uart0_dev = bflb_device_get_by_name("uart0");
-    // bflb_uart_deinit(uart0_dev);
-
-    gpio_dev = bflb_device_get_by_name("gpio");
-    // deinit all GPIOs
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_0);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_1);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_2);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_3);
-
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_10);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_11);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_12);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_13);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_14);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_15);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_16);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_17);
-
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_20);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_21);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_22);
-
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_27);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_28);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_29);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_30);
-
-    /* Core control UART 1 */
-#ifdef TANG_PRIMER25K
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_11, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_10, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
-#elif defined(TANG_NANO20K)
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_11, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_13, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
-#else
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_28, GPIO_UART_FUNC_UART1_TX);    // JTAG connector pin 6
-    bflb_gpio_uart_init(gpio_dev, GPIO_PIN_27, GPIO_UART_FUNC_UART1_RX);    // JTAG connector pin 7 (pin8 is GND, pin1 is VCC)
-#endif
-
-    /* Set up Core control UART parameters */
-    struct bflb_uart_config_s uart1_cfg = {
-        // .baudrate = 1000000,
-#if defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
-        .baudrate = 2000000,
-#else
-        // all other boards have 26Mhz XTAL
-        .baudrate = 2000000 * 40 / 26,
-#endif
-        .direction = UART_DIRECTION_TXRX,
-        .data_bits = UART_DATA_BITS_8,
-        .stop_bits = UART_STOP_BITS_1,
-        .parity    = UART_PARITY_NONE,
-        .bit_order = UART_LSB_FIRST,
-        .flow_ctrl = 0,  /* No CTS/RTS flow control */
-        .tx_fifo_threshold = 7,
-        .rx_fifo_threshold = 7,
-    };
-    /* Get handle to UART1 */
-    uart1_dev = bflb_device_get_by_name("uart1");
-    /* Initialize UART1 with the config */
-    bflb_uart_init(uart1_dev, &uart1_cfg);
-
-    bflb_uart_set_console(uart1_dev);       // for debug
-
-    // set JTAG pins to high-Z
-    // interrupts masked, SWGPIO mode, output off, input off, schmitt ON
-    const uint32_t GPIO_HIGH_Z = (1 << 22) | (0xB << 8) | (1 << 1);
-    *reg_gpio_tms = GPIO_HIGH_Z;
-    *reg_gpio_tck = GPIO_HIGH_Z;
-    *reg_gpio_tdo = GPIO_HIGH_Z;
-    *reg_gpio_tdi = GPIO_HIGH_Z;
-
-    // Initialize SD pins
-    board_sdh_gpio_init();
-    // bflb_gpio_init(gpio, GPIO_PIN_10, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D1
-    // bflb_gpio_init(gpio, GPIO_PIN_11, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D0
-    // bflb_gpio_init(gpio, GPIO_PIN_12, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // CLK
-    // bflb_gpio_init(gpio, GPIO_PIN_13, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // CMD
-    // bflb_gpio_init(gpio, GPIO_PIN_14, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D3
-    // bflb_gpio_init(gpio, GPIO_PIN_15, GPIO_FUNC_SDH | GPIO_ALTERNATE | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);  // D2
-
-    // Set GPIO 1 (physical pin 15) to high to enable SDMMC
-    bflb_gpio_init(gpio_dev, GPIO_PIN_16, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_set(gpio_dev, GPIO_PIN_16);
-}
-
-void enable_jtag_pins(void) {
-    // JTAG pins
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
-}
-
-void disable_jtag_pins(void) {
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TMS);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TCK);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDI);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDO);
-}
-
+// Override system printf() to send to FPGA
 int __attribute__((weak)) putchar(int ch) {
     fpga_tx_header(0x05, 2);
     fpga_tx_byte(ch);
     return ch;
 }
 
-/////////////////////////////////////////////////////////////////////////////////
-// Overlay and other core control over UART
-
-int _overlay_on = 1;
-
-int overlay_on() {
-    return _overlay_on;
-}
-
-void overlay_cursor(int col, int row) {
-    // uart1 command: 4 x[7:0] y[7:0]
-    taskENTER_CRITICAL();
-    fpga_tx_header(0x04, 3);
-    fpga_tx_byte(col);
-    fpga_tx_byte(row);
-    taskEXIT_CRITICAL();
-}
-
-// print to UART without the core displaying it. liveuart.py catches this.
-void dprint(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[256];
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    taskENTER_CRITICAL();
-    int len = strlen(buf);
-    fpga_tx_header(0x0d, len+1);
-    for(int i = 0; i < len; i++) {
-        fpga_tx_byte(buf[i]);
-    }
-    taskEXIT_CRITICAL();
-}
-
-void overlay_printf(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[256];
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    taskENTER_CRITICAL();
-    int len = strlen(buf);
-    fpga_tx_header(0x05, len+1);
-    for(int i = 0; i < len; i++) {
-        fpga_tx_byte(buf[i]);
-    }
-    taskEXIT_CRITICAL();
-}
-
-void overlay_clear() {
-    for (int i = 0; i < 28; i++) {
-        overlay_cursor(0, i);
-        //              01234567890123456789012345678901
-        overlay_printf("                                ");
-    }
-}
-
-void overlay_status(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[256];
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    overlay_cursor(1, 27);
-    overlay_printf(buf);
-}
-
-// show a pop-up message, press any key to discard (caller needs to redraw screen)
-// msg: could be multi-line (separate with \n), max 10 lines
-// center: whether to center the text
-void overlay_message(const char *msg, int center) {
-    // count number of lines and max width
-    int w[10], lines=10, maxw = 0;
-    int len = strlen(msg);
-    const char *end = msg + len;
-    const char *sol = msg;
-    for (int i = 0; i < 10; i++) {
-        const char *eol = strchr(sol, '\n');
-        if (eol) { // found \n
-            w[i] = min(eol - sol, 26);
-            maxw = max(w[i], maxw);
-            sol = eol+1;
-        } else {
-            w[i] = min(end - sol, 26);
-            maxw = max(w[i], maxw);
-            lines = i+1;
-            break;
-        }		
-    }
-    // status("");
-    // printf("w=%d, lines=%d", maxw, lines);
-    // draw a box 
-    int y0 = 14 - ((lines + 2) >> 1);
-    int y1 = y0 + lines + 2;
-    int x0 = 16 - ((maxw + 2) >> 1);
-    int x1 = x0 + maxw + 2;
-    for (int y = y0; y < y1; y++)
-        for (int x = x0; x < x1; x++) {
-            overlay_cursor(x, y);
-            if ((x == x0 || x == x1-1) && (y == y0 || y == y1-1))
-                overlay_printf("+");
-            else if (x == x0 || x == x1-1)
-                overlay_printf("|");
-            else if (y == y0 || y == y1-1)
-                overlay_printf("-");
-            else
-                overlay_printf(" ");
-        }
-    // print text
-    const char *s = msg;
-    for (int i = 0; i < lines; i++) {
-        if (center)
-            overlay_cursor(16-(w[i]>>1), y0+i+1);
-        else
-            overlay_cursor(x0+1, y0+i+1);
-        while (*s != '\n' && *s != '\0') {
-            overlay_printf("%c", *s);
-            s++;
-        }
-        s++;
-    }
-    // wait for a keypress
-    delay(300);
-    for (;;) {
-        uint16_t joy1=0, joy2=0, hid1=0, hid2=0;
-        get_joypad_states(&joy1, &joy2, &hid1, &hid2);
-        joy1 |= hid1; joy2 |= hid2;
-        if ((joy1 & 0x1) || (joy1 & 0x100) || (joy2 & 0x1) || (joy2 & 0x100))
-            break;
-    }
-    delay(300);
-}
-
-// read joypad states
-void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2)
-{
-    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-        *joy1 = joy1_state;
-        *joy2 = joy2_state;
-        *hid1 = hid1_state;
-        *hid2 = hid2_state;
-        xSemaphoreGive(state_mutex);
-    }
-}
-
-// query over UART to return if the correct core is loaded
-// return >= 0 if request is successful, -1 if timeout (200ms)
-int16_t get_core_id(void) {
-    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-        core_id = -1;
-        xSemaphoreGive(state_mutex);
-    }
-
-    // send command 1
-    fpga_tx_header(0x01, 1);
-
-    // TODO: use a queue for better performance
-    uint64_t start = bflb_mtimer_get_time_ms();
-    while (bflb_mtimer_get_time_ms() - start < 200) {
-        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
-            int16_t res = core_id;
-            if (res >= 0) {
-                xSemaphoreGive(state_mutex);
-                return res;
-            }
-            xSemaphoreGive(state_mutex);
-        }
-        delay(10);
-    }
-    return -1;
-}
-
-// set loading state
-void set_loading_state(int state) {
-    taskENTER_CRITICAL();
-    fpga_tx_header(0x06, 2);
-    fpga_tx_byte(state);        
-    taskEXIT_CRITICAL();
-}
-
-// turn overlay on/off
-void overlay(int state) {
-    taskENTER_CRITICAL();
-    _overlay_on = state;
-    fpga_tx_header(0x08, 2);
-    fpga_tx_byte(state);        
-    taskEXIT_CRITICAL();
-}
-
-// bring FPGA to a good state by sending a few 0's
-void send_blank_packet(void) {
-    taskENTER_CRITICAL();
-    for (int i = 0; i < 8; i++) {
-        fpga_tx_byte(0);
-    }
-    taskEXIT_CRITICAL();
-}
 
 /////////////////////////////////////////////////////////////////////////////////
 // Core loading and other file system operations
@@ -415,539 +99,6 @@ FileChooser file_chooser;
 // int file_dir[PAGESIZE];         // this file is a directory
 // int file_sizes[PAGESIZE];       
 // int file_len;		            // number of files on this page
-
-uint32_t get_file_size(const char *fname) {
-    FILINFO fno;
-    FRESULT r = f_stat(fname, &fno);
-    if (r != FR_OK) return 0;
-    return fno.fsize;
-}
-
-bool load_core(const char *fname) {
-    uint64_t writetdi_time_start;
-    uint64_t time_total;
-    UINT bytes = 0, total = 0;
-    uint64_t time_jtag = 0, time_flash = 0;
-
-    // FRESULT res_sd = f_mount(&fs_usb, "usb:", 1);
-    // if (res_sd != FR_OK) {
-    //     overlay_printf("mount fail, res:%d\r\n", res_sd);
-    //     return false;
-    // }
-    int len = get_file_size(fname);
-    overlay_status("Writing %u bytes...", len);
-
-    res_sd = f_open(&fcore, fname, FA_READ);
-    if (res_sd != FR_OK) {
-        overlay_printf("open fail, res:%d\r\n", res_sd);
-        return false;
-    }
-    bool res = false;
-
-    chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || (    idcodes[0] != IDCODE_GW5AT_60 
-                            && idcodes[0] != IDCODE_GWAST_138
-                            && idcodes[0] != IDCODE_GW5A_25
-                            && idcodes[0] != IDCODE_GW2A_18)) {
-        overlay_printf("No known board detected, IDCODE=%08x\n", idcodes[0]);
-        goto load_core_close;
-    }
-
-    if (!eraseSRAM()) {
-        overlay_printf("Failed to erase SRAM\n");
-        goto load_core_close;
-    }
-
-    // 138K needs erasing twice
-    overlay_status("Erasing again...");
-    if (!eraseSRAM()) {
-        overlay_printf("Failed to erase SRAM 2nd time\n");
-        goto load_core_close;
-    }    
-
-    if (!writeSRAM_start()) {
-        overlay_printf("Failed to start write SRAM\n");
-        goto load_core_close;
-    }
-
-    BYTE *fbuf_cached;
-    fbuf_cached = (BYTE*)malloc(BLOCK_SIZE);
-    if (!fbuf_cached) {
-        overlay_printf("Cannot malloc buffer\r\n");
-        goto load_core_close;
-    }
-
-#define JTAG_FAST
-
-    extern uint64_t jtag_writetdi_time;
-    writetdi_time_start = jtag_writetdi_time;
-    time_total = bflb_mtimer_get_time_us();
-#ifdef JTAG_FAST
-    taskENTER_CRITICAL();
-    jtag_enter_gpio_out_mode();
-    for (;;) {
-        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
-        if (bytes == 0) break;
-        total += bytes;
-        jtag_writeTDI_msb_first_gpio_out_mode(fbuf, bytes, total >= len);
-        if (bytes < BLOCK_SIZE) break;
-    }
-    jtag_exit_gpio_out_mode();
-    if (!writeSRAM_end()) {
-        overlay_status("Failed to program SRAM\n");
-        goto load_core_close;
-    }
-    taskEXIT_CRITICAL();
-
-#else
-    taskENTER_CRITICAL();
-    for (;;) {
-        uint64_t time_flash_start = bflb_mtimer_get_time_us();
-        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
-        time_flash += bflb_mtimer_get_time_us() - time_flash_start;
-        // overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
-        //     (uint32_t)f_tell(&fcore), bytes, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
-
-        if (bytes == 0) break;
-        // reverse msb/lsb as Gowin bitstream needs to MSB first
-        // also copy to cached memory for better performance
-        static unsigned char lookup[16] = {
-            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
-            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
-        for (int j = 0; j < bytes; j++)
-            fbuf_cached[j] = lookup[fbuf[j] & 0xf] << 4 | lookup[fbuf[j] >> 4];
-
-        total += bytes;
-        uint64_t time_jtag_start = bflb_mtimer_get_time_us();
-        if (!writeSRAM_send(fbuf_cached, bytes*8, total >= len)) {
-            overlay_status("Failed to send data to SRAM\n");
-            goto free_fbuf_cached;
-        }
-        time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
-        if (bytes < BLOCK_SIZE) break;
-    } 
-    if (!writeSRAM_end()) {
-        overlay_status("Failed to program SRAM\n");
-        goto free_fbuf_cached;
-    }
-    taskEXIT_CRITICAL();
-
-    free(fbuf_cached);
-#endif
-
-    time_total = bflb_mtimer_get_time_us() - time_total;
-    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
-        time_flash, jtag_writetdi_time - writetdi_time_start);
-
-    // printf("Status after program sram: %x\n", readStatusReg());
-    res = true;
-
-load_core_close:
-    f_close(&fcore);
-    return res;
-}
-
-// Send a romdata packet to core of len bytes in `fbuf`
-void send_fbuf_data(uint16_t len) {
-    taskENTER_CRITICAL();
-    fpga_tx_header(0x07, len+1);
-    for (int i = 0; i < len; i ++) {
-        fpga_tx_byte(fbuf[i]);
-    }
-    taskEXIT_CRITICAL();
-}
-
-// Load a NES ROM
-// return 0 if successful
-int loadnes(const char *fname) {
-    unsigned int off = 0, br, total = 0;
-    unsigned int size;
-    int r = 1;
-    DEBUG("loadnes start\n");
-
-    // check extension .nes
-    char *p = strcasestr(fname, ".nes");
-    if (p == NULL) {
-        overlay_message("Only .nes supported", 1);
-        goto loadnes_end;
-    }
-
-    r = f_open(&fcore, fname, FA_READ);
-    if (r) {
-        overlay_status("Cannot open file");
-        goto loadnes_end;
-    }
-    size = get_file_size(fname);
-
-    // load actual ROM
-    set_loading_state(1);
-    core_running = false;
-
-    // Send rom content
-    if ((r = f_lseek(&fcore, off)) != FR_OK) {
-        overlay_status("Seek failure");
-        goto loadnes_snes_end;
-    }
-
-
-    do {
-        if ((r = f_read(&fcore, fbuf, 1024 /*BLOCK_SIZE*/, &br)) != FR_OK)
-            break;
-        // start rom loading command
-        send_fbuf_data(br);
-        taskYIELD();                // allow gamepad polling to run
-        total += br;
-        if ((total & 0xfff) == 0) {	// display progress every 4KB
-            //              01234567890123456789012345678901
-            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
-        }
-    } while (br == 1024 /*BLOCK_SIZE*/);
-
-    DEBUG("loadnes: %d bytes\n", total);
-    overlay_status("Success");
-    core_running = true;
-
-    overlay(0);		// turn off OSD
-
-loadnes_snes_end:
-    set_loading_state(0);   // turn off game loading, this starts the core
-    f_close(&fcore);
-loadnes_end:
-    return r;
-}
-
-// return 0 if snes header is successfully parsed at off
-// typ 0: LoROM, 1: HiROM, 2: ExHiROM
-int parse_snes_header(FIL *fp, int pos, int file_size, int typ, unsigned char *hdr,
-                      int *map_ctrl, int *rom_type_header, int *rom_size,
-                      int *ram_size, int *company) {
-    unsigned int br;
-    if (f_lseek(fp, pos))
-        return 1;
-    f_read(fp, hdr, 64, &br);
-    if (br != 64) return 1;
-    int mc = hdr[21];
-    int rom = hdr[23];
-    int ram = hdr[24];
-    int checksum = (hdr[28] << 8) + hdr[29];
-    int checksum_compliment = (hdr[30] << 8) + hdr[31];
-    int reset = (hdr[61] << 8) + hdr[60];
-    int size2 = 1024 << rom;
-
-    overlay_status("size=%d", size2);
-
-    // calc heuristics score
-    int score = 0;		
-    if (size2 >= file_size) score++;
-    if (rom == 1) score++;
-    if (checksum + checksum_compliment == 0xffff) score++;
-    int all_ascii = 1;
-    for (int i = 0; i < 21; i++)
-        if (hdr[i] < 32 || hdr[i] > 127)
-            all_ascii = 0;
-    score += all_ascii;
-
-    overlay_status("pos=%x, type=%d, map_ctrl=%d, rom=%d, ram=%d, checksum=%x, checksum_comp=%x, reset=%x, score=%d\n", 
-            pos, typ, mc, rom, ram, checksum, checksum_compliment, reset, score);
-
-    if (rom < 14 && ram <= 7 && score >= 1 && 
-        reset >= 0x8000 &&				// reset vector position correct
-       ((typ == 0 && (mc & 3) == 0) || 	// normal LoROM
-        (typ == 0 && mc == 0x53)    ||	// contra 3 has 0x53 and LoROM
-        (typ == 1 && (mc & 3) == 1) ||	// HiROM
-        (typ == 2 && (mc & 3) == 2))) {	// ExHiROM
-        *map_ctrl = mc;
-        *rom_type_header = hdr[22];
-        *rom_size = rom;
-        *ram_size = ram;
-        *company = hdr[26];
-        return 0;
-    }
-    return 1;
-}
-
-// TODO: implement bsram backup
-// return 0 if successful
-int loadsnes(const char *fname) {
-    int r = 1;
-    DEBUG("loadsnes start");
-
-    // check extension .sfc or .smc
-    char *p = strcasestr(fname, ".sfc");
-    if (p == NULL)
-        p = strcasestr(fname, ".smc");
-    if (p == NULL) {
-        overlay_message("Only .smc or .sfc supported", 1);
-        return r;
-    }
-
-    r = f_open(&fcore, fname, FA_READ);
-    if (r) {
-        overlay_status("Cannot open file");
-        return r;
-    }
-    unsigned int br, total = 0;
-    int size = get_file_size(fname);
-    int map_ctrl, rom_type_header, rom_size, ram_size, company;
-    // parse SNES header from ROM file
-    int off = size & 0x3ff;		// rom header (0 or 512)
-    int header_pos;
-    overlay_status("snes rom header offset: %d\n", off);
-    
-    header_pos = 0x7fc0 + off;
-    if (parse_snes_header(&fcore, header_pos, size-off, 0, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
-        header_pos = 0xffc0 + off;
-        if (parse_snes_header(&fcore, header_pos, size-off, 1, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
-            header_pos = 0x40ffc0 + off;
-            if (parse_snes_header(&fcore, header_pos, size-off, 2, fbuf, &map_ctrl, &rom_type_header, &rom_size, &ram_size, &company)) {
-                overlay_status("Not a SNES ROM file");
-                delay(200);
-                goto loadsnes_close_file;
-            }
-        }
-    }
-
-    // load actual ROM
-    set_loading_state(1);		// enable game loading, this resets SNES
-    core_running = false;
-
-    // Send 64-byte header to snes
-    send_fbuf_data(64);
-
-    // Send rom content to snes
-    if ((r = f_lseek(&fcore, off)) != FR_OK) {
-        overlay_status("Seek failure");
-        goto loadsnes_snes_end;
-    }
-    do {
-        if ((r = f_read(&fcore, fbuf, BLOCK_SIZE, &br)) != FR_OK)
-            break;
-        if (br == 0) break;
-        send_fbuf_data(br);
-        total += br;
-        if ((total & 0xffff) == 0) {	// display progress every 64KB
-            overlay_status("%d/%dK", total >> 10, size >> 10);
-            if ((map_ctrl & 3) == 0)
-                overlay_printf(" Lo");
-            else if ((map_ctrl & 3) == 1)
-                overlay_printf(" Hi");
-            else if ((map_ctrl & 3) == 2)
-                overlay_printf(" ExHi");
-            //              01234567890123456789012345678901
-            overlay_printf(" ROM=%d RAM=%d                 ", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
-        }
-    } while (br == BLOCK_SIZE);
-
-    overlay_status("Success");
-    core_running = true;
-
-    overlay(0);		// turn off OSD
-
-loadsnes_snes_end:
-    set_loading_state(0);	// turn off game loading, this starts SNES
-loadsnes_close_file:
-    f_close(&fcore);
-    return r;
-}
-
-// check if gba_bios.bin is present in the root directory
-// if not, warn user, if present, load it
-void gba_load_bios() {
-    if (gba_bios_loaded | gba_missing_bios_warned) return;
-
-    DEBUG("gba_load_bios start\n");
-    FILINFO fno;
-    if (f_stat("usb:gba/gba_bios.bin", &fno) != FR_OK) {
-        overlay_message( "Cannot find /gba_bios.bin\n"
-                 "Using open source BIOS\n"
-                 "Expect low compatibility", 1);
-        gba_missing_bios_warned = 1;
-        return;
-    }
-
-    int r = 1;
-    unsigned br;
-    if (f_open(&fcore, "usb:gba/gba_bios.bin", FA_READ) != FR_OK) {
-        overlay_message("Cannot open /gba/gba_bios.bin", 1);
-        return;
-    }
-    set_loading_state(4);
-    do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
-            break;
-        send_fbuf_data(br);
-    } while (br == 1024);
-
-    f_close(&fcore);
-    gba_bios_loaded = 1;
-    DEBUG("gba_load_bios end\n");
-}
-
-int loadgba(const char *fname) {
-    DEBUG("loadgba start\n");
-    FRESULT r = FR_NO_FILE;
-
-    // check extension .gba
-    char *p = strcasestr(fname, ".gba");
-    if (p == NULL) {
-        overlay_message("Only .gba supported", 1);
-        return r;
-    }
-
-    unsigned int size = get_file_size(fname);
-
-    r = f_open(&fcore, fname, FA_READ);
-    if (r) {
-        overlay_status("Cannot open file");
-        return r;
-    }
-    unsigned int off = 0, br, total = 0;
-
-    // load actual ROM
-    set_loading_state(1);		// enable game loading, this resets GBA
-    core_running = false;
-
-    // Send rom content to gba
-    if ((r = f_lseek(&fcore, off)) != FR_OK) {
-        overlay_status("Seek failure");
-        goto loadgba_close;
-    }
-    // int detect = 0; // 1: past 'EEPR', 2: past 'FLAS', 3: past 'SRAM'
-    // gba_backup_type = GBA_BACKUP_NONE;
-    do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
-            break;
-
-        send_fbuf_data(br);
-        // TODO: do backup type detection
-
-        total += br;
-        if ((total & 0xffff) == 0) {	// display progress every 64KB
-            //              01234567890123456789012345678901
-            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
-        }
-    } while (br == 1024);
-
-    DEBUG("loadgba: %d bytes rom sent.\n", total); 
-
-    gba_load_bios();
-
-    overlay_status("Success");
-    core_running = true;
-
-    overlay(0);		// turn off OSD
-
-loadgba_close:
-    set_loading_state(0);   // turn off game loading, this starts the core
-    f_close(&fcore);
-    return r;
-}
-
-int loadmd(const char *fname) {
-    DEBUG("loadmd start\n");
-    FRESULT r = FR_NO_FILE;
-
-    // check extension .bin
-    char *p = strcasestr(fname, ".bin");
-    if (p == NULL)
-        p = strcasestr(fname, ".md");
-    if (p == NULL) {
-        overlay_message("Only .bin or .md supported", 1);
-        return r;
-    }
-
-    r = f_open(&fcore, fname, FA_READ);
-    if (r) {
-        overlay_status("Cannot open file");
-        return r;
-    }
-    unsigned int off = 0, br, total = 0;
-    unsigned int size = get_file_size(fname);
-
-    // load actual ROM
-    set_loading_state(1);		// enable game loading, this resets the core
-    core_running = false;
-
-    // Send rom content to core
-    if ((r = f_lseek(&fcore, off)) != FR_OK) {
-        overlay_status("Seek failure");
-        goto loadmd_close_file;
-    }
-    do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
-            break;
-        send_fbuf_data(br);
-        total += br;
-        if ((total & 0xfff) == 0) {	// display progress every 4KB
-            //              01234567890123456789012345678901
-            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
-        }
-    } while (br == 1024);
-
-    DEBUG("loadmd: %d bytes\n", total);
-    overlay_status("Success");
-    core_running = true;
-
-    overlay(0);		// turn off OSD
-
-loadmd_close_file:
-    set_loading_state(0);   // turn off game loading, this starts the core
-    f_close(&fcore);
-    return r;
-}
-
-int loadsms(const char *fname) {
-    DEBUG("loadsms start\n");
-    FRESULT r = FR_NO_FILE;
-
-    // check extension .bin
-    char *p = strcasestr(fname, ".sms");
-    if (p == NULL) {
-        overlay_message("Only .sms, .gg, and .sg supported", 1);
-        return r;
-    }
-
-    r = f_open(&fcore, fname, FA_READ);
-    if (r) {
-        overlay_status("Cannot open file");
-        return r;
-    }
-    unsigned int off = 0, br, total = 0;
-    unsigned int size = get_file_size(fname);
-    off = size % 1024;          // skipping 512-byte header if there is one
-
-    // load actual ROM
-    set_loading_state(1);		// enable game loading, this resets the core
-    core_running = false;
-
-    // Send rom content to core
-    if ((r = f_lseek(&fcore, off)) != FR_OK) {
-        overlay_status("Seek failure");
-        goto loadmd_close_file;
-    }
-    do {
-        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
-            break;
-        send_fbuf_data(br);
-        total += br;
-        if ((total & 0xfff) == 0) {	// display progress every 4KB
-            //              01234567890123456789012345678901
-            overlay_status("%d/%dK                          ", total >> 10, size >> 10);
-        }
-    } while (br == 1024);
-
-    DEBUG("loadsms: %d bytes\n", total);
-    overlay_status("Success");
-    core_running = true;
-
-    overlay(0);		// turn off OSD
-
-loadmd_close_file:
-    set_loading_state(0);   // turn off game loading, this starts the core
-    f_close(&fcore);
-    return r;
-}
-
 
 /////////////////////////////////////////////////////////////////////////////////
 // Menu display and user interaction
@@ -983,10 +134,6 @@ static void menu_in_pc() {
     }
 
 }
-
-extern vector<core_info> core_info_list;
-extern vector<int16_t> main_menu_config;
-extern bool find_core_for_board(string &fname, const char *core_name);
 
 
 // Menus for "NES", "SNES" ... entries
@@ -1025,10 +172,8 @@ static int menu_loadrom(const char *dir) {
     // dir determines the type of the ROM
     if (fname.find("usb:cores") == 0) {
         overlay_status("Core: %s", fname.c_str());
-        enable_jtag_pins();
-        load_core(fname.c_str());
+        fpga_program(fname.c_str());
         _overlay_on = 1;                // turn on overlay after core is loaded
-        disable_jtag_pins();
         return 0;       // return to main menu
     } 
 
@@ -1050,10 +195,8 @@ static int menu_loadrom(const char *dir) {
             string fname_core;
             if (find_core_for_board(fname_core, core->core_file)) {
                 // load core
-                enable_jtag_pins();
-                load_core(fname_core.c_str());
+                fpga_program(fname_core.c_str());
                 _overlay_on = 1;
-                disable_jtag_pins();
 
                 // allow 2 seconds for core to start
                 uint64_t start = bflb_mtimer_get_time_ms();
@@ -1164,49 +307,6 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     return 0;
 }
 
-// null-terminated list of core info
-std::vector<core_info> core_info_list;
-// Main menu listing:
-// >0: core id, -1: cores menu, -2: options menu, 0: end of list
-std::vector<int16_t> main_menu_config;
-
-void init_core_list() {
-    core_info_list = {
-        {1, "NES", "usb:nes", "nestang.bin", loadnes},
-        {2, "SNES", "usb:snes", "snestang.bin", loadsnes},
-        {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba},
-        {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd},
-        {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms},
-        {6, "IBM PC/XT", "sd:pc", "pctang.bin", loadpc}
-    };
-
-    main_menu_config = {1,2,
-#if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
-        3,4,5,6,
-#endif
-        -1, -2
-    };
-}
-
-// Find a core file in the search order:
-// usb:cores/${BOARD_NAME}/${core_name}
-// usb:cores/${core_name}
-bool find_core_for_board(string &fname, const char *core_name) {
-    // check usb:cores/${BOARD_NAME}/${core_name}
-    fname = string("usb:cores/") + BOARD_NAME + "/" + core_name;
-    FILINFO fno;
-    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
-        return true;
-    }
-
-    // check usb:cores/${core_name}
-    fname = string("usb:cores/") + core_name;
-    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
-        return true;
-    }
-    return false;
-}
-
 #define MAIN_TASK_STACK_SIZE  2048
 #define MAIN_TASK_PRIORITY    3
 #define UART1_RX_TASK_STACK_SIZE  512
@@ -1295,7 +395,7 @@ static void uart1_rx_task(void *pvParameters)
                         f_lseek(&ffloppy, sector * 512);
                         if (f_read(&ffloppy, fbuf, 512, &br) == FR_OK) {
                             fpga_tx_header(0x0a, br+1);
-                            for (int i = 0; i < br; i++) {
+                            for (UINT i = 0; i < br; i++) {
                                 fpga_tx_byte(fbuf[i]);
                             }
                         } else {
@@ -1337,14 +437,12 @@ static void main_task(void *pvParameters)
     }
     
     // load monitor core at startup
-    enable_jtag_pins();
     string fname;
     if (find_core_for_board(fname, "monitor.bin")) {
-        load_core(fname.c_str());
+        fpga_program(fname.c_str());
     } else {
         overlay_status("No monitor.bin found for board.");
     }
-    disable_jtag_pins();
 
     int line_start;
     int menu_cnt = main_menu_config.size();

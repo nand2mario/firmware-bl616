@@ -1,6 +1,8 @@
 #pragma once
 
 #include <strings.h>
+
+extern "C" {
 #include "bflb_gpio.h"
 #include "bflb_uart.h"
 
@@ -10,6 +12,7 @@
 
 // #include "usbh_core.h"
 #include "ff.h"
+}
 
 #define DEBUG(...) overlay_printf(__VA_ARGS__)
 // #define DEBUG(...) do {} while(0)
@@ -64,6 +67,7 @@ DERIVE_GPIO_OPS_IN(GPIO_PIN_JTAG_TDO);
 
 #include <string.h>
 
+/*
 #ifndef max
 #define max(a,b) \
    ({ __typeof__ (a) _a = (a); \
@@ -77,19 +81,13 @@ DERIVE_GPIO_OPS_IN(GPIO_PIN_JTAG_TDO);
        __typeof__ (b) _b = (b); \
      _a < _b ? _a : _b; })
 #endif
+*/
 
 static inline bool prefix(const char *pre, const char *str)
 {
     return strncasecmp(pre, str, strlen(pre)) == 0;
 }
-
-void overlay_status(const char *fmt, ...);
-void overlay_printf(const char *fmt, ...);
-void overlay_clear(void);
-void overlay_cursor(int x, int y);
-int overlay_on(void);
-void overlay(int on);
-void dprint(const char *fmt, ...);
+extern "C" char *strcasestr(const char *haystack, const char *needle);
 
 // return true if core is ready. then core_id is set.
 // return false if timeout after 100ms
@@ -98,9 +96,6 @@ bool get_core_status(void);
 void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2);
 extern int joy_choice(int start_line, int len, int *active, int overlay_key_code);
 extern void send_blank_packet(void);
-
-extern void bflb_uart_set_console(struct bflb_device_s *dev);
-extern char *strcasestr(const char *haystack, const char *needle);
 
 static inline void delay(uint32_t ms)
 {
@@ -112,21 +107,12 @@ static inline void delay(uint32_t ms)
 #endif
 }
 
-struct core_info {
-    uint16_t id;                    // 1: NES, 2: SNES, 3: GB, 4: GENESIS, 0: end
-    const char *display_name;
-    const char *rom_dir;            // usb:nes, usb:snes, etc.
-    const char *core_file;          // core file in cores/
-    int (*load_rom)(const char *fname);
-};
-
 #define OPTION_OSD_KEY_SELECT_START 1
 #define OPTION_OSD_KEY_SELECT_RIGHT 2
 
 extern int option_osd_key;
 #define OSD_KEY_CODE (option_osd_key == OPTION_OSD_KEY_SELECT_START ? 0xC : 0x84)
 
-extern int loadpc(const char *fname);
 extern void set_loading_state(int state);
 extern void send_fbuf_data(uint16_t len);
 extern void overlay_message(const char *msg, int center);
@@ -148,12 +134,18 @@ extern struct bflb_device_s *uart1_dev;
 extern void fpga_tx_header(int cmd, int len);
 extern void fpga_tx_byte(uint8_t b);
 
-// inline void fpga_tx(int cmd, uint16_t len, int *data) {
-//     bflb_uart_putchar(uart1_dev, 0xAA);
-//     bflb_uart_putchar(uart1_dev, len >> 8);
-//     bflb_uart_putchar(uart1_dev, len & 0xFF);
-//     for (int i = 0; i < len; i++) {
-//         bflb_uart_putchar(uart1_dev, data[i]);
-//     }
-// }
+extern uint32_t get_file_size(const char *fname);
 
+// Send a romdata packet to core of len bytes in `fbuf`
+extern void send_fbuf_data(uint16_t len);
+extern void send_blank_packet(void);
+
+extern SemaphoreHandle_t state_mutex;              
+extern volatile uint16_t joy1_state;
+extern volatile uint16_t joy2_state;
+extern volatile uint16_t hid1_state;
+extern volatile uint16_t hid2_state;
+extern volatile int16_t core_id;
+
+extern void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2);
+extern int16_t get_core_id(void);

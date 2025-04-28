@@ -1,7 +1,9 @@
-#include <string.h>
-#include "ff.h"
+#define _GNU_SOURCE
+#include <string.h>      // for strcasestr
 
 #include "utils.h"
+#include "cores.h"
+#include "overlay.h"
 
 bool floppy_mounted = false;
 USB_NOCACHE_RAM_SECTION FIL ffloppy;
@@ -116,3 +118,4 @@ int loadpc(const char *fname) {
 
     return 0;
 }
+

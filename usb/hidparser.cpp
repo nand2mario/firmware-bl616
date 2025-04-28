@@ -9,17 +9,10 @@
 #include <string.h>
 #include <set>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "hidparser.h"
 #include "usb2ps2.h"
 #include "utils.h"
-
-#ifdef __cplusplus
-}
-#endif
+#include "overlay.h"
 
 #define hidp_debugf(fmt, ...) do {} while(0)
 // #define DEBUG(fmt, ...) printf(fmt, ##__VA_ARGS__)

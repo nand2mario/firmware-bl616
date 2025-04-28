@@ -1,10 +1,17 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "FreeRTOS.h"
 #include "semphr.h"
-
 #include "usbh_core.h"
 #include "usbh_hid.h"
+
+#ifdef __cplusplus
+}
+#endif
 
 // Start USB gamepad tasks
 void usb_gamepad_init(void);

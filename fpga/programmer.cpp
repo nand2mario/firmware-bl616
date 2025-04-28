@@ -11,9 +11,12 @@
 
 #include <string.h>
 #include "programmer.h"
-#include "utils.h"
 #include <FreeRTOS.h>
 #include "task.h"
+#include "utils.h"
+#include "overlay.h"
+
+#define JTAG_MAX_CHAIN 8
 
 int chain_len;
 uint32_t idcodes[JTAG_MAX_CHAIN];
@@ -47,6 +50,17 @@ static tapState_t _state;
 
 const int JTAG_RATE=5000000;						// 5Mhz jtag speed
 const int JTAG_DELAY=32;                			// 320Mhz / 5Mhz / 2 = 32 cycles
+
+// Tang Primer 25K
+#define IDCODE_GW5A_25 0x0001281b
+// Tang Mega/Console 60K
+#define IDCODE_GW5AT_60 0x0001481b
+// Tang Mega/Console/Mega Pro 138K
+#define IDCODE_GWAST_138 0x0001081b
+// Not a current Tang board
+#define IDCODE_GW5AT_138 0x0001181b
+// Tang Nano 20K
+#define IDCODE_GW2A_18 0x0000081b
 
 // ------------------------------------------------------------
 // Physical I/O functions
@@ -840,6 +854,7 @@ bool eraseSRAM() {
 	return true;    
 }
 
+// Returns true if successful
 bool writeSRAM_start() {
 	overlay_status("Load SRAM\r\n");
 	// uint32_t status = readStatusReg();
@@ -911,4 +926,150 @@ void fpgaReset() {
 	send_command(NOOP);    
     set_state(RUN_TEST_IDLE);
     jtag_toggleClk(1000000);
+}
+
+void enable_jtag_pins(void) {
+    // JTAG pins
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TMS, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TCK, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDI, GPIO_OUTPUT | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+    bflb_gpio_init(gpio_dev, GPIO_PIN_JTAG_TDO, GPIO_INPUT  | GPIO_FLOAT | GPIO_SMT_EN | GPIO_DRV_3);
+}
+
+void disable_jtag_pins(void) {
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TMS);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TCK);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDI);
+    bflb_gpio_deinit(gpio_dev, GPIO_PIN_JTAG_TDO);
+}
+
+/////////////// top programming functions ///////////////
+
+bool fpga_program(const char *fname) {
+    uint64_t writetdi_time_start;
+    uint64_t time_total;
+    UINT bytes = 0, total = 0;
+    uint64_t time_jtag = 0, time_flash = 0;
+
+    // FRESULT res_sd = f_mount(&fs_usb, "usb:", 1);
+    // if (res_sd != FR_OK) {
+    //     overlay_printf("mount fail, res:%d\r\n", res_sd);
+    //     return false;
+    // }
+    int len = get_file_size(fname);
+    overlay_status("Writing %u bytes...", len);
+
+    FRESULT res_sd = f_open(&fcore, fname, FA_READ);
+    if (res_sd != FR_OK) {
+        overlay_printf("open fail, res:%d\r\n", res_sd);
+        return false;
+    }
+    bool res = false;
+
+	enable_jtag_pins();
+
+    chain_len = detectChain(JTAG_MAX_CHAIN);
+    if (chain_len == 0 || (    idcodes[0] != IDCODE_GW5AT_60 
+                            && idcodes[0] != IDCODE_GWAST_138
+                            && idcodes[0] != IDCODE_GW5A_25
+                            && idcodes[0] != IDCODE_GW2A_18)) {
+        overlay_printf("No known board detected, IDCODE=%08x\n", idcodes[0]);
+        goto load_core_close;
+    }
+
+    if (!eraseSRAM()) {
+        overlay_printf("Failed to erase SRAM\n");
+        goto load_core_close;
+    }
+
+    // 138K needs erasing twice
+    overlay_status("Erasing again...");
+    if (!eraseSRAM()) {
+        overlay_printf("Failed to erase SRAM 2nd time\n");
+        goto load_core_close;
+    }    
+
+    if (!writeSRAM_start()) {
+        overlay_printf("Failed to start write SRAM\n");
+        goto load_core_close;
+    }
+
+    BYTE *fbuf_cached;
+    fbuf_cached = (BYTE*)malloc(BLOCK_SIZE);
+    if (!fbuf_cached) {
+        overlay_printf("Cannot malloc buffer\r\n");
+        goto load_core_close;
+    }
+
+#define JTAG_FAST
+
+    extern uint64_t jtag_writetdi_time;
+    writetdi_time_start = jtag_writetdi_time;
+    time_total = bflb_mtimer_get_time_us();
+#ifdef JTAG_FAST
+    taskENTER_CRITICAL();
+    jtag_enter_gpio_out_mode();
+    for (;;) {
+        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
+        if (bytes == 0) break;
+        total += bytes;
+        jtag_writeTDI_msb_first_gpio_out_mode(fbuf, bytes, total >= len);
+        if (bytes < BLOCK_SIZE) break;
+    }
+    jtag_exit_gpio_out_mode();
+    if (!writeSRAM_end()) {
+        overlay_status("Failed to program SRAM\n");
+        goto load_core_close;
+    }
+    taskEXIT_CRITICAL();
+
+#else
+    taskENTER_CRITICAL();
+    for (;;) {
+        uint64_t time_flash_start = bflb_mtimer_get_time_us();
+        f_read(&fcore, fbuf, BLOCK_SIZE, &bytes);
+        time_flash += bflb_mtimer_get_time_us() - time_flash_start;
+        // overlay_status("f_read: offset=%u, bytes=%d, 4 bytes=%02x %02x %02x %02x", 
+        //     (uint32_t)f_tell(&fcore), bytes, fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
+
+        if (bytes == 0) break;
+        // reverse msb/lsb as Gowin bitstream needs to MSB first
+        // also copy to cached memory for better performance
+        static unsigned char lookup[16] = {
+            0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+            0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf, };
+        for (int j = 0; j < bytes; j++)
+            fbuf_cached[j] = lookup[fbuf[j] & 0xf] << 4 | lookup[fbuf[j] >> 4];
+
+        total += bytes;
+        uint64_t time_jtag_start = bflb_mtimer_get_time_us();
+        if (!writeSRAM_send(fbuf_cached, bytes*8, total >= len)) {
+            overlay_status("Failed to send data to SRAM\n");
+            goto free_fbuf_cached;
+        }
+        time_jtag += bflb_mtimer_get_time_us() - time_jtag_start;
+        if (bytes < BLOCK_SIZE) break;
+    } 
+    if (!writeSRAM_end()) {
+        overlay_status("Failed to program SRAM\n");
+        goto free_fbuf_cached;
+    }
+    taskEXIT_CRITICAL();
+
+    free(fbuf_cached);
+#endif
+
+    time_total = bflb_mtimer_get_time_us() - time_total;
+    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
+        time_flash, jtag_writetdi_time - writetdi_time_start);
+
+    // printf("Status after program sram: %x\n", readStatusReg());
+    res = true;
+
+load_core_close:
+    f_close(&fcore);
+
+	disable_jtag_pins();
+	
+    return res;
 }

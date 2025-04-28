@@ -1,12 +1,13 @@
 #include <vector>
 #include <string>
 
-#include "file_chooser.hpp"
-
 extern "C" {
-    #include "ff.h"
-    #include "utils.h"
+#include "ff.h"
 }
+
+#include "file_chooser.hpp"
+#include "overlay.h"
+#include "utils.h"
 
 #define PAGESIZE 22
 #define TOPLINE 2
