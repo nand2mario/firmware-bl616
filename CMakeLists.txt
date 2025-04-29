@@ -45,5 +45,5 @@ file(GLOB_RECURSE MY_SOURCES
 target_sources(app PRIVATE ${MY_SOURCES})
 sdk_set_main_file(main.cpp)
 
-project(firmware-bl616 CXX)
+project(tangcore CXX)
 

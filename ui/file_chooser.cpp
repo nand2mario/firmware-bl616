@@ -5,7 +5,7 @@ extern "C" {
 #include "ff.h"
 }
 
-#include "file_chooser.hpp"
+#include "file_chooser.h"
 #include "overlay.h"
 #include "utils.h"
 
@@ -26,7 +26,7 @@ bool FileChooser::list_files(string dir, vector<FileEntry> &files, int start, in
 
     // ".." entry at the top
     if (start == 0 && len > 0) {
-        files.push_back({dir == rootdir ? "<< Return to main menu" : "..", true});
+        files.push_back({dir == rootdir ? msg_return : "..", true});
     }
     if (start > 0) start--;
     *count = 1;

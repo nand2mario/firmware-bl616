@@ -25,13 +25,14 @@ extern "C" {
 #include "fatfs_diskio_register.h"
 }
 
-#include "file_chooser.hpp"
+#include "file_chooser.h"
 #include "programmer.h"
 #include "usb_gamepad.h"
 #include "utils.h"
 #include "cores.h"
 #include "overlay.h"
 #include "init.h"
+#include "menu_manager.h"
 
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
 #define UART_CONSOLE
@@ -42,6 +43,7 @@ extern "C" {
 int option_osd_key = OPTION_OSD_KEY_SELECT_RIGHT;
 int16_t active_core = -1;           // firmware detected this core as active
 bool core_running;                  // a rom is loaded and running on the core
+struct core_info *core;
 
 // UART
 struct bflb_device_s *gpio_dev;
@@ -103,39 +105,6 @@ FileChooser file_chooser;
 /////////////////////////////////////////////////////////////////////////////////
 // Menu display and user interaction
 
-// std::string choose_curfile;
-
-// In-core menu for PCXT
-static void menu_in_pc() {
-    while (1) {
-        overlay_clear();
-        overlay_cursor(0, 10);
-        //              01234567890123456789012345678901
-        overlay_printf("        - PCXT Menu -\n");
-        overlay_cursor(0, 12);
-        overlay_printf("  Load A:\n");
-        overlay_cursor(0, 13);
-        overlay_printf("  Load B:\n");
-        overlay_cursor(0, 14);
-        overlay_printf("  Reboot\n");
-        overlay_cursor(0, 15);
-        overlay_printf("  << Home\n");
-
-        int active = 0;
-        int r = joy_choice(12, 4, &active, OSD_KEY_CODE);
-        if (r == 1) {
-            // switch (active) {
-            //     case 0:
-            //     case 1:
-            //         if (choose_file()) {
-
-            //         }
-        }
-    }
-
-}
-
-
 // Menus for "NES", "SNES" ... entries
 // dir: initial dir
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
@@ -180,7 +149,6 @@ static int menu_loadrom(const char *dir) {
     // user chose a ROM file
     active_core = get_core_id();
     // find core info entry
-    struct core_info *core = NULL;
     for (auto c: core_info_list) {
         if (fname.find(c.rom_dir) == 0) {
             core = &c;
@@ -373,12 +341,12 @@ static void uart1_rx_task(void *pvParameters)
                 else
                     fbuf[pos-6] = ch;
                 if (pos == 6+511) {
-                    // uint16_t drive = buffer[0] >> 7;
+                    uint16_t drive = buffer[0] >> 7;
                     uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
-                    if (floppy_mounted) {
+                    if (floppy[drive]) {
                         UINT br;
-                        f_lseek(&ffloppy, sector * 512);
-                        if (f_write(&ffloppy, fbuf, 512, &br) != FR_OK) {
+                        f_lseek(&f_floppy[drive], sector * 512);
+                        if (f_write(&f_floppy[drive], fbuf, 512, &br) != FR_OK) {
                             overlay_status("Failed to write floppy");
                         }
                     }
@@ -388,12 +356,12 @@ static void uart1_rx_task(void *pvParameters)
             } else if (type == 5) {              // floppy read
                 buffer[pos-4] = ch;
                 if (pos == 5) {
-                    // uint16_t drive = buffer[0] >> 7;
+                    uint16_t drive = buffer[0] >> 7;
                     uint16_t sector = (buffer[0] & 0x7f) << 8 | buffer[1];
-                    if (floppy_mounted) {
+                    if (floppy[drive]) {
                         UINT br;
-                        f_lseek(&ffloppy, sector * 512);
-                        if (f_read(&ffloppy, fbuf, 512, &br) == FR_OK) {
+                        f_lseek(&f_floppy[drive], sector * 512);
+                        if (f_read(&f_floppy[drive], fbuf, 512, &br) == FR_OK) {
                             fpga_tx_header(0x0a, br+1);
                             for (UINT i = 0; i < br; i++) {
                                 fpga_tx_byte(fbuf[i]);
@@ -506,8 +474,30 @@ static void main_task(void *pvParameters)
                 // overlay_status("GPIO0-3 status: %08x %08x %08x %08x", *reg_gpio0, *reg_gpio1, *reg_gpio2, *reg_gpio3);
             }
 
+            bool before_overlay = overlay_on();
             int r = joy_choice(line_start+2, menu_cnt, &choice, OSD_KEY_CODE);
             if (r == 1) break;
+
+            if (!before_overlay && overlay_on() && active_core > 0) {
+                // overlay is turned back on, now display the pop-up menu
+                DEBUG("Displaying pop-up menu\n");
+                menu_clear();
+                // Menu *menu = core->create_menu(core->rom_dir)
+                core_info *core = find_core_by_id(active_core);
+                if (core != NULL) {
+                    DEBUG("Found core_info. Displaying menu\n");
+                    Menu *menu;
+                    if (active_core == 6) {
+                        menu = create_pcxt_menu(core->rom_dir);
+                    } else {
+                        menu = create_default_menu(core->rom_dir);
+                    }
+                    std::unique_ptr<Menu> menu_ptr(menu);
+                    push_menu(std::move(menu_ptr));
+                    menu->do_redraw();
+                    menu_input_loop();
+                }
+            }
 
             delay(20);
         }

@@ -126,7 +126,7 @@ extern USB_NOCACHE_RAM_SECTION FIL fcore;
 extern USB_NOCACHE_RAM_SECTION FIL ffloppy;
 #define BLOCK_SIZE (8*1024)
 extern USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
-extern bool floppy_mounted;
+extern bool mounted_a;
 
 extern struct bflb_device_s *uart1_dev;
 

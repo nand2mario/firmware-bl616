@@ -16,9 +16,9 @@ struct FileChooser {
     string rootdir;
     string curdir;
     string curfile;
+    string msg_return = "<< Return to main menu";
     // FATFS *fs;
 
-    FileChooser();
     // void set_fs(FATFS *fs);
     bool choose_file(string &res);      // return true if a file was chosen
     bool list_files(string dir, vector<FileEntry> &files, int start, int len, int *count);
