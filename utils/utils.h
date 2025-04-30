@@ -1,6 +1,7 @@
 #pragma once
 
 #include <strings.h>
+#include <string.h>
 
 extern "C" {
 #include "bflb_gpio.h"
@@ -65,23 +66,8 @@ DERIVE_GPIO_OPS_OUT(GPIO_PIN_JTAG_TCK);
 DERIVE_GPIO_OPS_OUT(GPIO_PIN_JTAG_TDI);
 DERIVE_GPIO_OPS_IN(GPIO_PIN_JTAG_TDO);
 
-#include <string.h>
-
-/*
-#ifndef max
-#define max(a,b) \
-   ({ __typeof__ (a) _a = (a); \
-       __typeof__ (b) _b = (b); \
-     _a > _b ? _a : _b; })
-#endif
-
-#ifndef min 
-#define min(a,b) \
-   ({ __typeof__ (a) _a = (a); \
-       __typeof__ (b) _b = (b); \
-     _a < _b ? _a : _b; })
-#endif
-*/
+// "sd:" or "usb:"
+extern const char *drv;
 
 static inline bool prefix(const char *pre, const char *str)
 {

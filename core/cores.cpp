@@ -32,12 +32,12 @@ Menu *create_pcxt_menu(const char *imgdir) {
 
 void init_core_list() {
     core_info_list = {
-        {1, "NES", "usb:nes", "nestang.bin", loadnes, create_default_menu},
-        {2, "SNES", "usb:snes", "snestang.bin", loadsnes, create_default_menu},
-        {3, "Game Boy Advance", "usb:gba", "gbatang.bin", loadgba, create_default_menu},
-        {4, "MegaDrive / Genesis", "usb:genesis", "mdtang.bin", loadmd, create_default_menu},
-        {5, "Sega Master System", "usb:sms", "smstang.bin", loadsms, create_default_menu},
-        {6, "IBM PC/XT", "usb:pc", "pctang.bin", loadpc, create_pcxt_menu}
+        {1, "NES", "nes", "nestang.bin", loadnes, create_default_menu},
+        {2, "SNES", "snes", "snestang.bin", loadsnes, create_default_menu},
+        {3, "Game Boy Advance", "gba", "gbatang.bin", loadgba, create_default_menu},
+        {4, "MegaDrive / Genesis", "genesis", "mdtang.bin", loadmd, create_default_menu},
+        {5, "Sega Master System", "sms", "smstang.bin", loadsms, create_default_menu},
+        {6, "IBM PC/XT", "pc", "pctang.bin", loadpc, create_pcxt_menu}
     };
 
     main_menu_config = {1,2,
@@ -50,20 +50,21 @@ void init_core_list() {
 
 
 extern const char *BOARD_NAME;
+extern char *drv;
 
 // Find a core file in the search order:
 // usb:cores/${BOARD_NAME}/${core_name}
 // usb:cores/${core_name}
 bool find_core_for_board(std::string &fname, const char *core_name) {
-    // check usb:cores/${BOARD_NAME}/${core_name}
-    fname = std::string("usb:cores/") + BOARD_NAME + "/" + core_name;
+    // check sd|usb:cores/${BOARD_NAME}/${core_name}
+    fname = std::string(drv) + "cores/" + BOARD_NAME + "/" + core_name;
     FILINFO fno;
     if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
         return true;
     }
 
-    // check usb:cores/${core_name}
-    fname = std::string("usb:cores/") + core_name;
+    // check sd|usb:cores/${core_name}
+    fname = std::string(drv) + "usb:cores/" + core_name;
     if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
         return true;
     }

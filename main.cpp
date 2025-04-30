@@ -52,6 +52,7 @@ struct bflb_device_s *uart1_dev;
 
 // USB and fatfs
 struct usbh_msc *msc;
+const char *drv = "sd:";
 
 // Tasks and shared state
 TaskHandle_t main_task_handle;
@@ -85,7 +86,7 @@ int __attribute__((weak)) putchar(int ch) {
 // Core loading and other file system operations
 
 // nand2mario: these USB data structures cannot be CACHED as they are written to by hardware
-USB_NOCACHE_RAM_SECTION FATFS fs_usb, fs_sd;
+USB_NOCACHE_RAM_SECTION FATFS fs;
 USB_NOCACHE_RAM_SECTION FIL fcore;
 USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE];
 
@@ -120,7 +121,7 @@ static int menu_loadrom(const char *dir) {
     // file_chooser.set_fs(usb ? &fs_usb : &fs_sd);
 
     if (dir[0] == 's') {
-        res_sd = f_mount(&fs_sd, "sd:", 1);
+        res_sd = f_mount(&fs, drv, 1);
         if (res_sd != FR_OK) {
             overlay_status("Failed to f_mount() SD card");
         }
@@ -139,7 +140,7 @@ static int menu_loadrom(const char *dir) {
     joy1_state = 0; joy2_state = 0; // clear joypad states
 
     // dir determines the type of the ROM
-    if (fname.find("usb:cores") == 0) {
+    if (fname.find(string(drv) + "cores") == 0) {
         overlay_status("Core: %s", fname.c_str());
         fpga_program(fname.c_str());
         _overlay_on = 1;                // turn on overlay after core is loaded
@@ -149,8 +150,9 @@ static int menu_loadrom(const char *dir) {
     // user chose a ROM file
     active_core = get_core_id();
     // find core info entry
+    string path = fname.substr(fname.find(":")+1);
     for (auto c: core_info_list) {
-        if (fname.find(c.rom_dir) == 0) {
+        if (path.find(c.rom_dir) == 0) {
             core = &c;
             overlay_status("ROM for: %s", core->display_name);
         }
@@ -393,17 +395,27 @@ static void main_task(void *pvParameters)
     // volatile uint32_t *reg_gpio3 = (volatile uint32_t *)0x200008d0;
 
     // wait for drive to be ready
-    overlay_status("Waiting for USB drive...");
     uint64_t start = bflb_mtimer_get_time_ms();
     FRESULT res;
-    while ((res = f_mount(&fs_usb, "usb:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 2000)
+    overlay_status("Mounting sd card...", drv);
+    while ((res = f_mount(&fs, "sd:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 500)
         delay(100);
-    if (res != FR_OK) {
-        overlay_status("Failed to mount USB drive");
-    } else {
-        overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+
+    if (res == FR_OK) {
+        overlay_status("SD card mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+    } else  {
+        overlay_status("SD not found. Mounting USB...");
+        drv = "usb:";
+        start = bflb_mtimer_get_time_ms();
+        while ((res = f_mount(&fs, "usb:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 2000)
+            delay(100);
+        if (res != FR_OK) {
+            overlay_status("Failed to mount USB drive");
+        } else {
+            overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+        }
     }
-    
+
     // load monitor core at startup
     string fname;
     if (find_core_for_board(fname, "monitor.bin")) {
@@ -488,9 +500,9 @@ static void main_task(void *pvParameters)
                     DEBUG("Found core_info. Displaying menu\n");
                     Menu *menu;
                     if (active_core == 6) {
-                        menu = create_pcxt_menu(core->rom_dir);
+                        menu = create_pcxt_menu(std::string(drv).append(core->rom_dir).c_str());
                     } else {
-                        menu = create_default_menu(core->rom_dir);
+                        menu = create_default_menu(std::string(drv).append(core->rom_dir).c_str());
                     }
                     std::unique_ptr<Menu> menu_ptr(menu);
                     push_menu(std::move(menu_ptr));
@@ -512,10 +524,10 @@ static void main_task(void *pvParameters)
                 }
             }
             if (core) 
-                menu_loadrom(core->rom_dir);
+                menu_loadrom(std::string(drv).append(core->rom_dir).c_str());
         } else if (main_menu_config[choice] == -1) {
             // load cores manually
-            menu_loadrom("usb:cores");
+            menu_loadrom(std::string(drv).append("cores").c_str());
         } else if (main_menu_config[choice] == -2) {
             // Options
             menu_options();
@@ -560,17 +572,15 @@ int main(void)
     // Create mutex for joypad states
     state_mutex = xSemaphoreCreateMutex();
 
-    overlay_status("Initializing USB host...");
+    overlay_status("Initializing SDH...");
+    fatfs_sdh_driver_register();        // calls SDH_Init()
+    // f_mount(&fs_sd, "sd:", 0);          // registers SDMMC drive 
 
     // Initializing USB host...
+    overlay_status("Initializing USB host...");
     usbh_initialize();
     fatfs_usbh_driver_register();
-    f_mount(&fs_usb, "usb:", 0);        // registers USB drive
     usb_gamepad_init();
-
-    overlay_status("Initializing SDMMC...");
-    fatfs_sdh_driver_register();        // calls SDH_Init()
-    f_mount(&fs_sd, "sd:", 0);          // registers SDMMC drive 
 
     overlay_status("Creating tasks...");
     // Create the tasks

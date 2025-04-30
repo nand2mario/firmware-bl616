@@ -9,7 +9,7 @@
 struct core_info {
     uint16_t id;                    // 1: NES, 2: SNES, 3: GB, 4: GENESIS, 0: end
     const char *display_name;
-    const char *rom_dir;            // usb:nes, usb:snes, etc.
+    const char *rom_dir;            // nes, snes, etc.
     const char *core_file;          // core file in cores/
     int (*load_rom)(const char *fname);
     Menu *(*create_menu)(const char *imgdir);
