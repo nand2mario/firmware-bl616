@@ -74,8 +74,10 @@ void menu_input_loop() {
             bool r = menu_current()->on_choose(active);
             if (r) {
                 pop_menu();
-                if (!menu_is_active())
+                if (!menu_is_active()) {
+                    delay(100);
                     return;
+                }
             }
             if (menu_stack.size() != depth) {   // menu changed
                 options = menu_current()->get_options();

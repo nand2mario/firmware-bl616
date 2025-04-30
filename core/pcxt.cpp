@@ -176,17 +176,24 @@ bool PcxtMenu::on_choose(int idx) {
         c.curdir = imgdir;
         c.msg_return = "<< Cancel";
         std::string fname;
-        c.choose_file(fname);
+        bool r = c.choose_file(fname);
         delay(200);
-        if (!fname.empty()) {
-            mount_floppy(idx, fname.c_str());
-            do_redraw();
-            return false;       // don't close menu
-        }
+        do_redraw();
+        if (r) {
+            if (fname.find(".img") != std::string::npos) {
+                mount_floppy(idx, fname.c_str());
+                return false;       // don't close pop-up menu
+            } else {
+                overlay_message("Only .img floppy supported", 1);
+                return false;
+            }
+        } 
+        return false;               // cancelled
     } else if (idx == 2) {
         overlay_printf("Reset Core\n");
         set_loading_state(1);
         set_loading_state(0);
+        overlay(0);
         return true;            // close menu
     } else if (idx == 3) {
         overlay_printf("<< Main Menu\n");
