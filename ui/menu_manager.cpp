@@ -78,6 +78,7 @@ void menu_input_loop() {
                     delay(100);
                     return;
                 }
+                menu_current()->do_redraw();
             }
             if (menu_stack.size() != depth) {   // menu changed
                 options = menu_current()->get_options();

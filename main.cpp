@@ -107,29 +107,14 @@ FileChooser file_chooser;
 // Menu display and user interaction
 
 // Menus for "NES", "SNES" ... entries
-// dir: initial dir
+// dir: initial dir including the drive name (e.g. "sd:nes", "usb:cores")
 // return 0: user chose a ROM (*choice), 1: no choice made, -1: error
 // file chosen: pwd / file_name[*choice]
 static int menu_loadrom(const char *dir) {
-    // res_sd = f_mount(&fs, "usb:", 1);
-    // if (res_sd != FR_OK) {
-    //     overlay_status("Failed to mount USB drive\n");
-    //     return -1;
-    // }
-    // string sdir(dir);
-    // bool usb = (sdir.find("usb:") == 0);
-    // file_chooser.set_fs(usb ? &fs_usb : &fs_sd);
-
-    if (dir[0] == 's') {
-        res_sd = f_mount(&fs, drv, 1);
-        if (res_sd != FR_OK) {
-            overlay_status("Failed to f_mount() SD card");
-        }
-    }
-
     string fname;
     file_chooser.rootdir = dir;
     file_chooser.curdir = dir;
+    file_chooser.msg_return = "<< Return to main menu";
     bool r = file_chooser.choose_file(fname);
     if (!r) {
         overlay_status("No file chosen");
@@ -139,7 +124,7 @@ static int menu_loadrom(const char *dir) {
     // now proceed to load the core and ROM
     joy1_state = 0; joy2_state = 0; // clear joypad states
 
-    // dir determines the type of the ROM
+    // load core if in cores/ dir
     if (fname.find(string(drv) + "cores") == 0) {
         overlay_status("Core: %s", fname.c_str());
         fpga_program(fname.c_str());
@@ -147,21 +132,28 @@ static int menu_loadrom(const char *dir) {
         return 0;       // return to main menu
     } 
 
-    // user chose a ROM file
-    active_core = get_core_id();
     // find core info entry
+    core_info *core = NULL;
     string path = fname.substr(fname.find(":")+1);
-    for (auto c: core_info_list) {
-        if (path.find(c.rom_dir) == 0) {
-            core = &c;
-            overlay_status("ROM for: %s", core->display_name);
+    for (int i = 0; i < core_info_list.size(); i++) {
+        core_info *c = &core_info_list[i];
+        if (path.find(c->rom_dir) == 0) {
+            overlay_status("ROM for: %s", c->display_name);
+            core = c;
+            break;
         }
     }
+    if (core == NULL) {
+        overlay_status("Core not found: %s", path.c_str());
+        return -1;
+    }
+
+    // user chose a ROM file
+    active_core = get_core_id();
 
     // load core if needed
     if (core != NULL) {
-        // load core if needed
-        if (active_core != core->id) {
+        if (active_core != core->id) {      // active core is not what we need
             string fname_core;
             if (find_core_for_board(fname_core, core->core_file)) {
                 // load core
@@ -523,11 +515,14 @@ static void main_task(void *pvParameters)
                     break;
                 }
             }
-            if (core) 
-                menu_loadrom(std::string(drv).append(core->rom_dir).c_str());
+            if (core) {
+                std::string dir = std::string(drv).append(core->rom_dir);
+                menu_loadrom(dir.c_str());
+            }
         } else if (main_menu_config[choice] == -1) {
             // load cores manually
-            menu_loadrom(std::string(drv).append("cores").c_str());
+            std::string dir = std::string(drv).append("cores");
+            menu_loadrom(dir.c_str());
         } else if (main_menu_config[choice] == -2) {
             // Options
             menu_options();

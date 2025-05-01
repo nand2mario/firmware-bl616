@@ -15,7 +15,7 @@ extern "C" {
 #include "ff.h"
 }
 
-#define DEBUG(...) overlay_printf(__VA_ARGS__)
+#define DEBUG(...) dprint(__VA_ARGS__)
 // #define DEBUG(...) do {} while(0)
 
 extern struct bflb_device_s *gpio_dev;

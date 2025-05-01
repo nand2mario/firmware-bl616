@@ -98,7 +98,7 @@ int loadpc(const char *fname) {
     // check extension .img
     const char *p = strcasestr(fname, ".img");
     if (p == NULL) {
-        overlay_message("Only .img floppy supported", 1);
+        overlay_message("PC only supports .img", 1);
         return -1;
     }
 
