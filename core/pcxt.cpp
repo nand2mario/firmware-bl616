@@ -94,9 +94,9 @@ bool mount_floppy(int drive, const char *fname) {
 int loadpc(const char *fname) {
     FILINFO fno;
 
-    DEBUG("loadpc start\n");
+    DEBUG("loadpc start: %s\n", fname);
     // check extension .img
-    char *p = strcasestr(fname, ".img");
+    const char *p = strcasestr(fname, ".img");
     if (p == NULL) {
         overlay_message("Only .img floppy supported", 1);
         return -1;
@@ -180,7 +180,7 @@ bool PcxtMenu::on_choose(int idx) {
         delay(200);
         do_redraw();
         if (r) {
-            if (fname.find(".img") != std::string::npos) {
+            if (strcasestr(fname.c_str(), ".img") != NULL) {
                 mount_floppy(idx, fname.c_str());
                 return false;       // don't close pop-up menu
             } else {

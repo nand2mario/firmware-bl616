@@ -46,7 +46,18 @@ void send_blank_packet(void) {
     taskEXIT_CRITICAL();
 }
 
+#include <string>
+#include <algorithm>
 
+const char *cstr_find_ignore_case(const char *str, const char *substr) {
+    std::string s(str);
+    std::string ss(substr);
+    auto it = std::search(s.begin(), s.end(), ss.begin(), ss.end(), [](char a, char b) {
+        return std::tolower(a) == std::tolower(b);
+    });
+    if (it == s.end()) return NULL;
+    return str + (it - s.begin());
+}
 
 /////////////////////////////////////////////////////////////////////////////////
 // Shared state among tasks

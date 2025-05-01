@@ -152,13 +152,17 @@ def handle_fpga_command():
         print(f"<joypad_state:{st.hex()}>")
     elif command == 4:  # floppy write request
         check_len(buf, 515)
-        sector = int.from_bytes(buf[1:3], 'big')
+        drive_sector = int.from_bytes(buf[1:3], 'big')
+        drive = drive_sector >> 15
+        sector = drive_sector & 0x7FFF
         data = buf[3:515]
-        print(f"<floppy_write:{sector}:{data[:4].hex()}...>")
+        print(f"<floppy_write:{drive}:{sector}:{data[:4].hex()}...>")
     elif command == 5:  # floppy read request
         check_len(buf, 3)
-        sector = int.from_bytes(buf[1:3], 'big')
-        print(f"<floppy_read:{sector}>")
+        drive_sector = int.from_bytes(buf[1:3], 'big')
+        drive = drive_sector >> 15
+        sector = drive_sector & 0x7FFF
+        print(f"<floppy_read:{drive}:{sector}>")
     else:
         print(f"{chr(command[0])}", end="")
 
