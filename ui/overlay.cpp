@@ -69,13 +69,21 @@ void overlay_clear() {
 }
 
 void overlay_status(const char *fmt, ...) {
-    overlay_cursor(1, 27);
     va_list args;
     va_start(args, fmt);
-    // char buf[256];
-    overlay_printf(fmt, args);
-    //vsnprintf(buf, sizeof(buf), fmt, args);
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
+    buf[255] = '\0';
+
+    overlay_cursor(1, 27);
+    taskENTER_CRITICAL();
+    int len = strlen(buf);
+    fpga_tx_header(0x05, len+1);
+    for(int i = 0; i < len; i++) {
+        fpga_tx_byte(buf[i]);
+    }
+    taskEXIT_CRITICAL();
 }
 
 // show a pop-up message, press any key to discard (caller needs to redraw screen)

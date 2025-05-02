@@ -1,17 +1,19 @@
 // USB gamepad (Xinput and HID)
 // Based on FPGA-Companion by Till Harbaum
 
-extern "C" {
 #include "usbh_core.h"
 #include "usb_config.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
 #include "bflb_mtimer.h"
-}
 
 #include "usb_gamepad.h"
 #include "hidparser.h"
+
+#include "overlay.h"
+
+#include <string>
 
 // Uncomment this to enable on-screen debug messages
 // #define DEBUG_ON
@@ -36,7 +38,7 @@ extern "C" {
 struct hid_info_S {
     int index;
     int state;
-    struct usbh_hid *class_code;     // USB host HID class
+    struct usbh_hid *hid_class;     // USB host HID class
     uint8_t *buffer;            // URB transfer buffer
     int nbytes;                 // number of bytes in the buffer
     hid_report_t report;        // parsed HID report descriptor
@@ -49,7 +51,7 @@ struct hid_info_S {
 struct xbox_info_S {
     int index;
     int state;
-    struct usbh_hid *class_code;     // USB host Xbox class
+    struct usbh_hid *hid_class;     // USB host Xbox class
     uint8_t *buffer;
     int nbytes;
     struct usb_config *usb;
@@ -75,10 +77,12 @@ USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t xbox_buffer[CONFIG_USBHOST_MAX_XB
 // them individually
 static uint8_t joystick_map = 0;
 
+#define DEBUG_ON
+
 void overlay_status(const char *fmt, ...);
 #define INFO(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
 #ifdef DEBUG_ON
-#define DEBUG(fmt, ...) overlay_status(fmt, ##__VA_ARGS__)
+#define DEBUG(fmt, ...) dprint(fmt, ##__VA_ARGS__)
 #else
 #define DEBUG(fmt, ...) do {} while(0)
 #endif
@@ -120,9 +124,9 @@ void usbh_xbox_callback(void *arg, int nbytes) {
 #define print_usb_class_info(cls) \
     DEBUG("Interval: %d, ", cls->hport->config.intf[i].altsetting[0].ep[0].ep_desc.bInterval); \
     DEBUG("Interface %d, ", cls->intf); \
-    DEBUG("  class %d, ", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceClass); \
-    DEBUG("  subclass %d, ", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceSubClass); \
-    DEBUG("  protocol %d\n", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceProtocol);
+    DEBUG("class %d, ", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceClass); \
+    DEBUG("subclass %d, ", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceSubClass); \
+    DEBUG("protocol %d\n", cls->hport->config.intf[i].altsetting[0].intf_desc.bInterfaceProtocol);
 
 uint8_t joy_driver_map = 0;
 
@@ -146,29 +150,28 @@ static void usbh_update(struct usb_config *usb) {
     }
 
     // check for active hid devices
-    for(int i=0;i<CONFIG_USBHOST_MAX_HID_CLASS;i++) {
-        char *dev_str = "/dev/inputX";
-        dev_str[10] = '0' + i;
-        usb->hid_info[i].class_code = (struct usbh_hid *)usbh_find_class_instance(dev_str);
-        if (usb->hid_info[i].class_code) {
+    for(int i=0; i<CONFIG_USBHOST_MAX_HID_CLASS; i++) {
+        std::string dev = "/dev/input"+std::to_string(i);
+        usb->hid_info[i].hid_class = (struct usbh_hid *)usbh_find_class_instance(dev.c_str());
+        if (usb->hid_info[i].hid_class) {
             joy_driver_map |= (1 << i);
         } else {
             joy_driver_map &= ~(1 << i);
         }
         
-        if(usb->hid_info[i].class_code && usb->hid_info[i].state == STATE_NONE) {
+        if(usb->hid_info[i].hid_class && usb->hid_info[i].state == STATE_NONE) {
             INFO("HID %d connected\n", i);
-            print_usb_class_info(usb->hid_info[i].class_code);
+            print_usb_class_info(usb->hid_info[i].hid_class);
             bool skip = false;
-            uint16_t vendor_id = usb->hid_info[i].class_code->hport->device_desc.idVendor;
-            uint16_t product_id = usb->hid_info[i].class_code->hport->device_desc.idProduct;
+            uint16_t vendor_id = usb->hid_info[i].hid_class->hport->device_desc.idVendor;
+            uint16_t product_id = usb->hid_info[i].hid_class->hport->device_desc.idProduct;
             if (vendor_id == 0x2dc8 && product_id == 0x3107) {  // 8bitdo wireless adapter
                 skip = true;
             }
-            // DEBUG("report descriptor: %p", usb->hid_info[i].class->report_desc);
+            // DEBUG("report descriptor: %p", usb->hid_info[i].hid_class->report_desc);
             
             // parse report descriptor ...
-            if(skip || !parse_report_descriptor(usb->hid_info[i].class_code->report_desc, 128, &usb->hid_info[i].report, NULL)) {
+            if(skip || !parse_report_descriptor(usb->hid_info[i].hid_class->report_desc, 128, &usb->hid_info[i].report, NULL)) {
                 usb->hid_info[i].state = STATE_FAILED;   // parsing failed, don't use
                 return;
             }
@@ -176,7 +179,7 @@ static void usbh_update(struct usb_config *usb) {
             usb->hid_info[i].state = STATE_DETECTED;
         }
         
-        else if(!usb->hid_info[i].class_code && usb->hid_info[i].state != STATE_NONE) {
+        else if(!usb->hid_info[i].hid_class && usb->hid_info[i].state != STATE_NONE) {
             INFO("HID %d disconnected\n", i);
             if (usb->hid_info[i].task_handle) {
                 vTaskDelete( usb->hid_info[i].task_handle );
@@ -194,22 +197,21 @@ static void usbh_update(struct usb_config *usb) {
 
     // check for active xbox devices
     for(int i=0;i<CONFIG_USBHOST_MAX_XBOX_CLASS;i++) {
-        char *dev_str = "/dev/xboxX";
-        dev_str[9] = '0' + i;
-        usb->xbox_info[i].class_code = (struct usbh_hid *)usbh_find_class_instance(dev_str);
-        if (usb->xbox_info[i].class_code) {
+        std::string dev = "/dev/xbox"+std::to_string(i);
+        usb->xbox_info[i].hid_class = (struct usbh_hid *)usbh_find_class_instance(dev.c_str());
+        if (usb->xbox_info[i].hid_class) {
             joy_driver_map |= (1 << (i + 2));
         } else {
             joy_driver_map &= ~(1 << (i + 2));
         }
         
-        if(usb->xbox_info[i].class_code && usb->xbox_info[i].state == STATE_NONE) {
+        if(usb->xbox_info[i].hid_class && usb->xbox_info[i].state == STATE_NONE) {
             INFO("Xinput %d connected\n", i);
-            print_usb_class_info(usb->xbox_info[i].class_code);
+            print_usb_class_info(usb->xbox_info[i].hid_class);
             usb->xbox_info[i].state = STATE_DETECTED;
         }
         
-        else if(!usb->xbox_info[i].class_code && usb->xbox_info[i].state != STATE_NONE) {
+        else if(!usb->xbox_info[i].hid_class && usb->xbox_info[i].state != STATE_NONE) {
             INFO("Xinput %d disconnected\n", i);
             if (usb->xbox_info[i].task_handle) {
                 vTaskDelete( usb->xbox_info[i].task_handle );
@@ -309,10 +311,11 @@ static uint16_t kbd_to_joy(uint8_t *buffer, int nbytes) {
 static void usbh_hid_client_thread(void *arg) {
     struct hid_info_S *hid = (struct hid_info_S *)arg;
 
-    INFO("HID #%d on        \n", hid->index);
+    std::string id = std::to_string(hid->index);
+    INFO("HID #%d on\n", hid->index);
 
     while(1) {
-        int ret = usbh_submit_urb(&hid->class_code->intin_urb);
+        int ret = usbh_submit_urb(&hid->hid_class->intin_urb);
         if (ret < 0)
             DEBUG("HID client #%d: submit failed %d\n", hid->index, ret);
         else {
@@ -362,12 +365,12 @@ uint8_t xbox_ep2_packets[4][3] = {{0x01, 0x03, 0x02}, {0x02, 0x08, 0x03},
 
 static void xbox_init(struct xbox_info_S *xbox) {
     for (int i = 0; i < 4; i++) {
-        usbh_bulk_urb_fill(&xbox->class_code->intout_urb,
-            xbox->class_code->hport,
-            xbox->class_code->intout,
+        usbh_bulk_urb_fill(&xbox->hid_class->intout_urb,
+            xbox->hid_class->hport,
+            xbox->hid_class->intout,
             xbox_ep2_packets[i], 3,
             0, usbh_xbox_callback, xbox);
-        int ret = usbh_submit_urb(&xbox->class_code->intout_urb);
+        int ret = usbh_submit_urb(&xbox->hid_class->intout_urb);
         if (ret < 0)
             DEBUG("XBOX FATAL: submit EP2 failed %d", ret);
         else
@@ -383,7 +386,7 @@ static void usbh_xbox_client_thread(void *arg) {
 
     // Send initialization packets
     for (int i = 0; i < 4; i++) {
-        if ((ret = usbh_control_transfer(xbox->class_code->hport, &xbox_init_packets[i], xbox->buffer)) < 0) {
+        if ((ret = usbh_control_transfer(xbox->hid_class->hport, &xbox_init_packets[i], xbox->buffer)) < 0) {
             DEBUG("XBOX: init packet %d failed: %d", i, ret);
         }
     }
@@ -391,13 +394,13 @@ static void usbh_xbox_client_thread(void *arg) {
     DEBUG("XBOX client #%d: all init packets sent, entering main loop.\n", xbox->index);
 
     // setup urb
-    usbh_int_urb_fill(&xbox->class_code->intin_urb, xbox->class_code->hport, 
-            xbox->class_code->intin, xbox->buffer, XBOX_REPORT_SIZE,
+    usbh_int_urb_fill(&xbox->hid_class->intin_urb, xbox->hid_class->hport, 
+            xbox->hid_class->intin, xbox->buffer, XBOX_REPORT_SIZE,
             50, usbh_xbox_callback, xbox);
 
     int total = 0, error = 0;
     while(1) {
-        int ret = usbh_submit_urb(&xbox->class_code->intin_urb);
+        int ret = usbh_submit_urb(&xbox->hid_class->intin_urb);
         total++;
         if (ret < 0) {
             error++;
@@ -424,7 +427,7 @@ static void usbh_xbox_client_thread(void *arg) {
                 error++;
                 if (xbox->nbytes == -USB_ERR_TIMEOUT) {
                     INFO("XBOX client #%d: timeout, reinit\n", xbox->index);
-                    usbh_kill_urb(&xbox->class_code->intin_urb);
+                    usbh_kill_urb(&xbox->hid_class->intin_urb);
                     // reinit if we timeout (device could've gone asleep)
                     xbox_init(xbox);
                 }
@@ -470,13 +473,13 @@ static void usbh_hid_thread(void *argument) {
                 DEBUG("  -> joystick %d", usb->hid_info[i].hid_state.joystick.js_index);
 
                 // setup urb
-                usbh_int_urb_fill(&usb->hid_info[i].class_code->intin_urb,
-                        usb->hid_info[i].class_code->hport,
-                        usb->hid_info[i].class_code->intin, usb->hid_info[i].buffer,
+                usbh_int_urb_fill(&usb->hid_info[i].hid_class->intin_urb,
+                        usb->hid_info[i].hid_class->hport,
+                        usb->hid_info[i].hid_class->intin, usb->hid_info[i].buffer,
                         usb->hid_info[i].report.report_size + (usb->hid_info[i].report.report_id_present ? 1:0),
                         0, usbh_hid_callback, &usb->hid_info[i]);     
 
-                xTaskCreate(usbh_hid_client_thread, (char *)"hid_client_task", 1024,
+                xTaskCreate(usbh_hid_client_thread, (char *)"hid_client_task", 2048,
                         &usb->hid_info[i], configMAX_PRIORITIES-3, &usb->hid_info[i].task_handle );
             }
         }
@@ -531,5 +534,5 @@ void usb_gamepad_init(void) {
         usb_config.xbox_info[i].sem = xSemaphoreCreateBinary();
     }
 
-    xTaskCreate(usbh_hid_thread, (char *)"usbh_hid_task", 2048, &usb_config, configMAX_PRIORITIES-3, &usb_handle);
+    xTaskCreate(usbh_hid_thread, (char *)"usbh_hid_task", 4096, &usb_config, configMAX_PRIORITIES-3, &usb_handle);
 }

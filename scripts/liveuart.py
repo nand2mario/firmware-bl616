@@ -31,7 +31,7 @@ def handle_cursor_move(buf):
 def handle_print(buf):
     global newline
     try:
-        s = buf[1:].decode('utf-8')
+        s = buf[1:].decode("ascii", errors="ignore")
     except UnicodeDecodeError:
         print(f"<print:len={len(buf)}, DECODE_ERROR>")
         return
@@ -145,7 +145,7 @@ def handle_fpga_command():
         st = buf[1]
         print(f"<core_id={st}>")
     elif command == 2:  # Response config string (null-terminated)
-        print(f"<config_string:{buf[1:].decode('utf-8')}>")
+        print(f"<config_string:{buf[1:].decode('ascii', errors='ignore')}>")
     elif command == 3:  # Response joypad state
         check_len(buf, 5)
         st = buf[1:5]
