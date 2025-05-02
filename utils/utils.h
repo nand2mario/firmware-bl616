@@ -132,8 +132,12 @@ extern volatile uint16_t joy2_state;
 extern volatile uint16_t hid1_state;
 extern volatile uint16_t hid2_state;
 extern volatile int16_t core_id;
+extern volatile uint8_t key_buf[4];     // ascii keys when overlay is on, non-zero if key is pressed
+                                        // read should take all bytes and clear buffer
 
 extern void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t *hid2);
 extern int16_t get_core_id(void);
+extern uint32_t get_core_config(void);
+extern void set_core_config(uint32_t config);
 
 extern const char *cstr_find_ignore_case(const char *str, const char *substr);

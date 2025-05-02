@@ -78,12 +78,15 @@ def handle_bl616_command():
         print(f"{chr(sync[0])}", end="")
         return
     
-    len = int.from_bytes(ser.read(2), 'big')
-    if len >= 2048:
-        print(f"Length too large: {len}")
+    remaining_bytes = int.from_bytes(ser.read(2), 'big')
+    if remaining_bytes >= 2048:
+        print(f"Length too large: {remaining_bytes}")
         return
 
-    buf = ser.read(len)
+    buf = bytes()
+    while remaining_bytes > 0:
+        buf += ser.read(remaining_bytes)
+        remaining_bytes -= len(buf)
     command = buf[0]
     if not command or command == b'\x00':
         return
@@ -99,7 +102,7 @@ def handle_bl616_command():
     elif command == 5 or command == 13:  # Command 5 - Print
         handle_print(buf)
     elif command == 6:  # Command 6 - set loading state
-        if len == 2:
+        if len(buf) == 2:
             print(f"<set_loading_state:{buf[1]}>")
         else:
             print(f"<set_loading_state:BAD_COMMAND>")

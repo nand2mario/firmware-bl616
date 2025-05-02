@@ -500,6 +500,50 @@ void kbd_tx(const ps2_scancode_t scancode) {
 	taskEXIT_CRITICAL();
 }
 
+uint8_t usb_to_ascii(uint8_t code, uint8_t modifier) {
+	bool ctrl = modifier & 0x01 || modifier & 0x10;
+	bool shift = modifier & 0x02 || modifier & 0x20;
+	bool alt = modifier & 0x04 || modifier & 0x40;
+	bool gui = modifier & 0x08 || modifier & 0x80;
+	bool sh = shift && !ctrl && !alt && !gui;
+
+    // Handle special keys first
+    if (code == 0x28) return '\n';  // Enter
+    if (code == 0x2C) return ' ';   // Space
+	if (code == 0x2A) return '\b';  // Backspace
+	if (code == 0x2B) return '\t';  // Tab
+	if (code == 0x29) return '\e';  // Esc
+    if (code == 0x2D) return sh ? '_' : '-';   // Minus
+    if (code == 0x2E) return sh ? '+' : '=';   // Equals
+    if (code == 0x2F) return sh ? '{' : '[';   // Left bracket
+    if (code == 0x30) return sh ? '}' : ']';   // Right bracket
+    if (code == 0x31) return sh ? '|' : '\\';  // Backslash
+    if (code == 0x33) return sh ? ':' : ';';   // Semicolon
+    if (code == 0x34) return sh ? '"' : '\'';  // Quote
+    if (code == 0x35) return sh ? '~' : '`';   // Backtick
+    if (code == 0x36) return sh ? '<' : ',';   // Comma
+    if (code == 0x37) return sh ? '>' : '.';   // Period
+    if (code == 0x38) return sh ? '?' : '/';   // Forward slash
+
+    // Handle number keys (0-9)
+    if (code >= 0x1E && code <= 0x27) {
+        if (sh) {
+            return ")!@#$%^&*(" [code - 0x1E];
+        }
+        return "1234567890" [code - 0x1E];
+    }
+
+    // Handle letter keys (a-z)
+    if (code >= 0x04 && code <= 0x1D) {
+        if (sh) {
+            return 'A' + (code - 0x04);
+        }
+        return 'a' + (code - 0x04);
+    }
+
+    return 0;  // Return 0 for unhandled keys
+}
+
 // 8 bytes keyboard report: [0]: modifiers, [2-7]: keys pressed
 // we convert to ps2 keyboard report and send to the core
 // F12 toggles the OSD state. In OSD, arrow keys and space/enter are used for navigation.
@@ -520,7 +564,6 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 	}
   
 	// send scancodes
-	bool changed = false;
 	std::set<uint8_t> now, last, all;
 	for (int i = 0; i < 6; i++) {
 		if (buffer[2+i]) {
@@ -540,7 +583,27 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 		if (!last.count(i)) {
 			// key pressed
 			ps2_scancode_t r = usb_to_ps2(i, false);
-			if (send) kbd_tx(r);
+			if (send) 
+				kbd_tx(r);
+			else {
+				// put into key_buf
+				bool found = false;
+				uint8_t ascii = usb_to_ascii(i, buffer[0]);
+                if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+					int j = key_buf[0] == 0 ? 0 :
+					        key_buf[1] == 0 ? 1 :
+							key_buf[2] == 0 ? 2 :
+							key_buf[3] == 0 ? 3 : -1;
+					if (j != -1) {
+						key_buf[j] = ascii;
+						found = true;
+					}
+                    xSemaphoreGive(state_mutex);
+                }
+				if (found) {
+					DEBUG("kbd_parse: key %d, buf={%d %d %d %d}\n", ascii, key_buf[0], key_buf[1], key_buf[2], key_buf[3]);
+				}
+			}
 		} 
 		if (!now.count(i)) {
 			// key released

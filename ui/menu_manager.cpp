@@ -1,7 +1,9 @@
 #include "menu_manager.h"
 #include <memory>
 #include <vector>
+
 #include "utils.h"
+#include "console.h"
 
 std::vector<std::unique_ptr<Menu>> menu_stack;
 
@@ -87,6 +89,13 @@ void menu_input_loop() {
                 menu_current()->do_redraw();
             }
         }
+
+        if (key_input() == '`') {
+            // enter command console
+            command_console();
+            menu_current()->do_redraw();
+        }
+
         if (last != active)
             delay(100);
         last = active;

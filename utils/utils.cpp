@@ -59,6 +59,23 @@ const char *cstr_find_ignore_case(const char *str, const char *substr) {
     return str + (it - s.begin());
 }
 
+static uint32_t core_config;
+
+uint32_t get_core_config(void) {
+    return core_config;
+}
+
+void set_core_config(uint32_t config) {
+    core_config = config;
+    taskENTER_CRITICAL();
+    fpga_tx_header(0x03, 5);
+    fpga_tx_byte(config >> 24);
+    fpga_tx_byte(config >> 16);
+    fpga_tx_byte(config >> 8);
+    fpga_tx_byte(config);
+    taskEXIT_CRITICAL();
+}
+
 /////////////////////////////////////////////////////////////////////////////////
 // Shared state among tasks
 volatile uint16_t joy1_state = 0;
@@ -66,6 +83,7 @@ volatile uint16_t joy2_state = 0;
 volatile uint16_t hid1_state = 0;
 volatile uint16_t hid2_state = 0;
 volatile int16_t core_id = -1;
+volatile uint8_t key_buf[4] = {0};
 SemaphoreHandle_t state_mutex;              // for all global state access
 
 // read joypad states
