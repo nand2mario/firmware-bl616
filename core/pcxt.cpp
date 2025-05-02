@@ -103,16 +103,16 @@ int loadpc(const char *fname) {
     }
 
     if (!core_running) {
-        const char *BIOS = "usb:pc/bios.bin";
+        std::string BIOS = std::string(drv).append("pc/bios.bin");
         UINT br;
 
         // load BIOS
         DEBUG("load BIOS\n");
-        if (f_stat(BIOS, &fno) != FR_OK) {
+        if (f_stat(BIOS.c_str(), &fno) != FR_OK) {
             overlay_message( "Cannot find /pc/bios.bin", 1);
             return -1;
         }
-        if (f_open(&fcore, BIOS, FA_READ) != FR_OK) {
+        if (f_open(&fcore, BIOS.c_str(), FA_READ) != FR_OK) {
             overlay_message( "Cannot open /pc/bios.bin", 1);
             return -1;
         }

@@ -6,7 +6,8 @@ if not exist buildall mkdir buildall
 del /Q buildall\*
 
 REM List of boards to build
-set "boards=console60k console138k mega60k mega138k primer25k"
+set "boards=console60k console138k"
+@REM set "boards=console60k console138k mega60k mega138k primer25k"
 
 for %%b in (%boards%) do (
     echo Building for board: %%b

@@ -108,7 +108,7 @@ int loadsnes(const char *fname) {
         goto loadsnes_snes_end;
     }
     do {
-        if ((r = f_read(&fcore, fbuf, BLOCK_SIZE, &br)) != FR_OK)
+        if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
             break;
         if (br == 0) break;
         send_fbuf_data(br);
@@ -124,7 +124,7 @@ int loadsnes(const char *fname) {
             //              01234567890123456789012345678901
             overlay_printf(" ROM=%d RAM=%d                 ", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
         }
-    } while (br == BLOCK_SIZE);
+    } while (br == 1024);
 
     overlay_status("Success");
     core_running = true;
