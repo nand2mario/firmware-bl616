@@ -56,7 +56,7 @@ struct console_s {
         while (1) {
             overlay_cursor(pos, command_row);
             if (caret) {
-                overlay_printf("_");    // print caret
+                overlay_printf("_ ");    // print caret
                 caret = false;
             }
             uint8_t key = key_input();
