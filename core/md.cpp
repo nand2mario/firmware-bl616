@@ -36,6 +36,7 @@ int loadmd(const char *fname) {
         if ((r = f_read(&fcore, fbuf, 1024, &br)) != FR_OK)
             break;
         send_fbuf_data(br);
+        taskYIELD();                // allow gamepad polling to run
         total += br;
         if ((total & 0xfff) == 0) {	// display progress every 4KB
             //              01234567890123456789012345678901

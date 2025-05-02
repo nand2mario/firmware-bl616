@@ -500,6 +500,7 @@ static void main_task(void *pvParameters)
                     push_menu(std::move(menu_ptr));
                     menu->do_redraw();
                     menu_input_loop();
+                    redraw = true;
                 }
             }
 

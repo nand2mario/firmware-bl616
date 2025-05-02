@@ -15,7 +15,7 @@ struct console_s {
     uint8_t key_input() {
         if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
             if (key_buf[0] != 0 || key_buf[1] != 0 || key_buf[2] != 0 || key_buf[3] != 0) {
-                DEBUG("key_input: key_buf={%d %d %d %d}\n", key_buf[0], key_buf[1], key_buf[2], key_buf[3]);
+                // DEBUG("key_input: key_buf={%d %d %d %d}\n", key_buf[0], key_buf[1], key_buf[2], key_buf[3]);
                 for (int i = 0; i < 4; i++) {
                     if (key_buf[i] != 0) {
                         uint8_t key = key_buf[i];
@@ -30,7 +30,7 @@ struct console_s {
             return 0;
         uint8_t key = key_q[0];
         key_q.erase(key_q.begin());
-        DEBUG("key_input: %d\n", key);
+        // DEBUG("key_input: %d\n", key);
         return key;
     }
 

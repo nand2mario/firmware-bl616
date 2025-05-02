@@ -600,9 +600,9 @@ void kbd_parse(const hid_report_t *report, struct hid_kbd_state_S *state,
 					}
                     xSemaphoreGive(state_mutex);
                 }
-				if (found) {
-					DEBUG("kbd_parse: key %d, buf={%d %d %d %d}\n", ascii, key_buf[0], key_buf[1], key_buf[2], key_buf[3]);
-				}
+				// if (found) {
+				// 	DEBUG("kbd_parse: key %d, buf={%d %d %d %d}\n", ascii, key_buf[0], key_buf[1], key_buf[2], key_buf[3]);
+				// }
 			}
 		} 
 		if (!now.count(i)) {

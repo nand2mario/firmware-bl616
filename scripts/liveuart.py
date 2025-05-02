@@ -107,7 +107,7 @@ def handle_bl616_command():
         else:
             print(f"<set_loading_state:BAD_COMMAND>")
     elif command == 7:  # Command 7 - load data
-        print(f"<load_data:{len}>")
+        print(f"<load_data:{len(buf)}>")
         # handle_load_data(buf)
     elif command == 8:  # Command 8 - set overlay state
         handle_overlay_state(buf)
