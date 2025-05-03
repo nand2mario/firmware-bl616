@@ -1060,7 +1060,7 @@ bool fpga_program(const char *fname) {
 #endif
 
     time_total = bflb_mtimer_get_time_us() - time_total;
-    overlay_status("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
+    DEBUG("Time: total=%lld us, jtag=%lld us, flash=%lld us, writetdi=%lld us", time_total, time_jtag, 
         time_flash, jtag_writetdi_time - writetdi_time_start);
 
     // printf("Status after program sram: %x\n", readStatusReg());

@@ -64,7 +64,7 @@ bool find_core_for_board(std::string &fname, const char *core_name) {
     }
 
     // check sd|usb:cores/${core_name}
-    fname = std::string(drv) + "usb:cores/" + core_name;
+    fname = std::string(drv) + "cores/" + core_name;
     if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
         return true;
     }

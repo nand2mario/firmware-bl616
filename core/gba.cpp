@@ -17,8 +17,10 @@ void gba_load_bios() {
 
     DEBUG("gba_load_bios start\n");
     FILINFO fno;
-    if (f_stat("usb:gba/gba_bios.bin", &fno) != FR_OK) {
-        overlay_message( "Cannot find /gba_bios.bin\n"
+    std::string bios_path(drv);
+    bios_path.append("gba/gba_bios.bin");
+    if (f_stat(bios_path.c_str(), &fno) != FR_OK) {
+        overlay_message( "Cannot find gba_bios.bin\n"
                  "Using open source BIOS\n"
                  "Expect low compatibility", 1);
         gba_missing_bios_warned = 1;
@@ -27,7 +29,7 @@ void gba_load_bios() {
 
     int r = 1;
     unsigned br;
-    if (f_open(&fcore, "usb:gba/gba_bios.bin", FA_READ) != FR_OK) {
+    if (f_open(&fcore, bios_path.c_str(), FA_READ) != FR_OK) {
         overlay_message("Cannot open /gba/gba_bios.bin", 1);
         return;
     }
