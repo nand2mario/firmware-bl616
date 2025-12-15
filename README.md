@@ -38,6 +38,27 @@ The 2nd line flashes the firmware to BL616 (The required `bl616_fpga_partner_60k
 
 For the USB drive, You need an OTG dongle to turn the connector from a "device" one to a "host" one, and provide power at the same time.
 
+## Build with Docker (macOS / Linux)
+
+Build the image:
+
+```bash
+docker build -t firmware-bl616-builder . --load
+```
+
+Then run `make` inside the container (outputs will be written into your working tree, e.g. `./build`):
+
+```bash
+docker run --rm -v "$PWD":/work -w /work firmware-bl616-builder
+```
+
+On Apple Silicon, if you hit toolchain issues, try forcing x86 emulation:
+
+```bash
+docker build --platform linux/amd64 -t firmware-bl616-builder . --load
+docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work firmware-bl616-builder
+```
+
 Acknowledgements
 * JTAG FPGA programming logic based on [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
 * Gamepad support based on Till Harbaum's [FPGA-Companion](https://github.com/harbaum/FPGA-Companion)

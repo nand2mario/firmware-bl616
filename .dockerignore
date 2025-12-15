@@ -1,0 +1,13 @@
+.DS_Store
+.git
+.github
+
+# Local build output
+build
+**/build
+
+# Editor / tooling
+.idea
+.vscode
+**/__pycache__
+**/*.pyc
