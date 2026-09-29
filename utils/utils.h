@@ -140,4 +140,12 @@ extern int16_t get_core_id(void);
 extern uint32_t get_core_config(void);
 extern void set_core_config(uint32_t config);
 
+#define CORE_CONF_MAX 255
+extern char core_conf_str[CORE_CONF_MAX + 1];
+extern volatile int16_t core_conf_len;
+#ifdef __cplusplus
+#include <string>
+extern bool get_core_conf_string(std::string &out);
+#endif
+
 extern const char *cstr_find_ignore_case(const char *str, const char *substr);

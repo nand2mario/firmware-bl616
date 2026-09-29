@@ -4,6 +4,17 @@
 
 #include "utils.h"
 #include "console.h"
+#include "options_menu.h"
+
+extern int16_t active_core;
+
+bool DefaultMenu::on_choose(int idx) {
+    if (idx == 1) {
+        push_menu(std::unique_ptr<Menu>(create_options_menu(active_core)));
+        return false;
+    }
+    return true;
+}
 
 std::vector<std::unique_ptr<Menu>> menu_stack;
 

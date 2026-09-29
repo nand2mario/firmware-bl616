@@ -34,14 +34,14 @@ struct DefaultMenu: Menu {
         overlay_clear();
         overlay_cursor(0, 13);
         overlay_printf("<< Main Menu\n");
+        overlay_cursor(0, 14);
+        overlay_printf("   Options\n");
     }
 
     std::vector<int> get_options() override {
-        return {13};
+        return {13, 14};
     }
 
-    bool on_choose(int idx) override {
-        return true;
-    }
+    bool on_choose(int idx) override;   // menu_manager.cpp: 0 = back, 1 = Options
 };
 

@@ -83,6 +83,10 @@ volatile uint16_t joy2_state = 0;
 volatile uint16_t hid1_state = 0;
 volatile uint16_t hid2_state = 0;
 volatile int16_t core_id = -1;
+// Core config string (MiSTer-style CONF_STR, command 0x02), published by the UART RX
+// task. core_conf_len is -1 until a complete string has arrived.
+char core_conf_str[CORE_CONF_MAX + 1];
+volatile int16_t core_conf_len = -1;
 volatile uint8_t key_buf[4] = {0};
 SemaphoreHandle_t state_mutex;              // for all global state access
 
@@ -96,6 +100,28 @@ void get_joypad_states(uint16_t *joy1, uint16_t *joy2, uint16_t *hid1, uint16_t 
         *hid2 = hid2_state;
         xSemaphoreGive(state_mutex);
     }
+}
+
+// Ask the core for its config string. Returns false on timeout (300 ms).
+bool get_core_conf_string(std::string &out) {
+    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+        core_conf_len = -1;
+        xSemaphoreGive(state_mutex);
+    }
+    taskENTER_CRITICAL();
+    fpga_tx_header(0x02, 1);
+    taskEXIT_CRITICAL();
+    uint64_t start = bflb_mtimer_get_time_ms();
+    while (bflb_mtimer_get_time_ms() - start < 300) {
+        if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+            int16_t n = core_conf_len;
+            if (n >= 0) out.assign(core_conf_str, n);
+            xSemaphoreGive(state_mutex);
+            if (n >= 0) return true;
+        }
+        delay(10);
+    }
+    return false;
 }
 
 // query over UART to return if the correct core is loaded
