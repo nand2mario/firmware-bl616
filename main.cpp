@@ -17,6 +17,7 @@ extern "C" {
 #include "bl616_glb.h"
 #include "bflb_gpio.h"
 #include "bflb_uart.h"
+#include "bflb_irq.h"
 #include "bflb_clock.h"
 #include "bl616_clock.h"
 
@@ -274,17 +275,61 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
 #define UART1_RX_TASK_STACK_SIZE  512
 #define UART1_RX_TASK_PRIORITY    3
 
+// UART1 RX is drained by an interrupt into a software ring and parsed by
+// uart1_rx_task. Polling left the 32-byte hardware FIFO unattended whenever the task
+// was not scheduled, so bytes were lost and frames truncated while the CPU was busy.
+// Single producer (ISR), single consumer (task): each side writes only its own index.
+#define U1RX_RING_SIZE  4096u
+#define U1RX_RING_MASK  (U1RX_RING_SIZE - 1u)
+static uint8_t u1rx_ring[U1RX_RING_SIZE];
+static volatile uint32_t u1rx_head = 0;
+static volatile uint32_t u1rx_tail = 0;
+
+static void uart1_isr(int irq, void *arg)
+{
+    (void)irq; (void)arg;
+    uint32_t st = bflb_uart_get_intstatus(uart1_dev);
+    if (st & (UART_INTSTS_RX_FIFO | UART_INTSTS_RTO)) {
+        while (bflb_uart_rxavailable(uart1_dev)) {
+            uint8_t ch = bflb_uart_getchar(uart1_dev);
+            uint32_t nxt = (u1rx_head + 1u) & U1RX_RING_MASK;
+            if (nxt == u1rx_tail)
+                continue;               // ring full: drop, but keep draining the FIFO
+            u1rx_ring[u1rx_head] = ch;
+            u1rx_head = nxt;
+        }
+    }
+    // the receive timeout delivers a frame's tail when it is shorter than the threshold
+    if (st & UART_INTSTS_RTO)
+        bflb_uart_int_clear(uart1_dev, UART_INTCLR_RTO);
+}
+
+static inline bool u1rx_get(uint8_t *ch)
+{
+    if (u1rx_tail == u1rx_head) return false;
+    *ch = u1rx_ring[u1rx_tail];
+    u1rx_tail = (u1rx_tail + 1u) & U1RX_RING_MASK;
+    return true;
+}
+
+static void uart1_rx_irq_init(void)
+{
+    bflb_uart_rxint_mask(uart1_dev, false);
+    bflb_irq_attach(uart1_dev->irq_num, uart1_isr, NULL);
+    bflb_irq_enable(uart1_dev->irq_num);
+}
+
 // Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)
 {
     uint8_t buffer[5];
-    uint8_t pos = 0;
+    uint16_t pos = 0;           // frames run to 518 bytes (floppy write)
     uint8_t type = 0;
     uint16_t len = 0;
     
     while (1) {
-        if (bflb_uart_rxavailable(uart1_dev)) {
-            uint8_t ch = bflb_uart_getchar(uart1_dev);
+        uint8_t ch;
+        if (u1rx_get(&ch)) {
             
             if (pos == 0) {          // expecting 0xAA
                 if (ch == 0xAA) 
@@ -581,6 +626,7 @@ int main(void)
     overlay_status("Creating tasks...");
     // Create the tasks
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
+    uart1_rx_irq_init();        // before the parser task runs, so no byte is missed
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
     
     vTaskStartScheduler();

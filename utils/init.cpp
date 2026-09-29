@@ -73,7 +73,13 @@ void init_gpio_and_uart() {
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
 
-    bflb_uart_set_console(uart1_dev);       // for debug
+    // SDK console output goes to UART0, not UART1: UART1 is the FPGA link and raw
+    // console bytes written there can land inside a frame and corrupt it. UART0's pins
+    // are released above, so the output is simply dropped.
+    {
+        struct bflb_device_s *uart0 = bflb_device_get_by_name("uart0");
+        if (uart0) bflb_uart_set_console(uart0);
+    }
 
     // set JTAG pins to high-Z
     // interrupts masked, SWGPIO mode, output off, input off, schmitt ON
